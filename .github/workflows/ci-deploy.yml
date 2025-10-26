@@ -43,8 +43,8 @@ jobs:
       - name: Setup Firebase CLI
         run: npm i -g firebase-tools@latest
 
-      - name: Deploy to Firebase Hosting & Functions
-        env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
-        run: |
-          firebase deploy --only hosting,functions --token "$FIREBASE_TOKEN"
+- name: Deploy to Firebase Hosting
+  env:
+    FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+  run: |
+    firebase deploy --only hosting --token "$FIREBASE_TOKEN"
