@@ -7,17 +7,16 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: 18
-
-      - name: Install root deps (if any)
-        run: npm ci || true
+          node-version: '20.19.0'
+          cache: 'npm'
 
       - name: Build therapist app
         working-directory: apps/therapist
@@ -38,6 +37,4 @@ jobs:
         env:
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
         run: |
-          # Opcional: seleccionar proyecto si hace falta
-          # firebase use --add $FIREBASE_PROJECT_ID --token "$FIREBASE_TOKEN"
           firebase deploy --only hosting,functions --token "$FIREBASE_TOKEN"
