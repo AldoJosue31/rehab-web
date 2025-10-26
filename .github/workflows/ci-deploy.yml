@@ -1,0 +1,43 @@
+name: Build & Deploy to Firebase
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install root deps (if any)
+        run: npm ci || true
+
+      - name: Build therapist app
+        working-directory: apps/therapist
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build patient app
+        working-directory: apps/patient
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup Firebase CLI
+        run: npm i -g firebase-tools@latest
+
+      - name: Deploy to Firebase Hosting & Functions
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          # Opcional: seleccionar proyecto si hace falta
+          # firebase use --add $FIREBASE_PROJECT_ID --token "$FIREBASE_TOKEN"
+          firebase deploy --only hosting,functions --token "$FIREBASE_TOKEN"
