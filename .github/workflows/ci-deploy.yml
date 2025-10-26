@@ -12,17 +12,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      # Build + cache for therapist
+      - name: Setup Node.js for therapist (with cache)
         uses: actions/setup-node@v4
         with:
           node-version: '20.19.0'
           cache: 'npm'
+          cache-dependency-path: apps/therapist/package-lock.json
 
       - name: Build therapist app
         working-directory: apps/therapist
         run: |
           npm ci
           npm run build
+
+      # Build + cache for patient
+      - name: Setup Node.js for patient (with cache)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.19.0'
+          cache: 'npm'
+          cache-dependency-path: apps/patient/package-lock.json
 
       - name: Build patient app
         working-directory: apps/patient
