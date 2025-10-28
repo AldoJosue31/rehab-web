@@ -1,5 +1,8 @@
 {
   "projects": {
-    "default": "m-health-rehabilitacion-g3a4gr"
-  }
+    "default": "m-health-rehabilitacion-g3a4gr",
+    "terap": "m-health-rehabilitacion-g3a4gr"
+  },
+  "targets": {},
+  "etags": {}
 }
