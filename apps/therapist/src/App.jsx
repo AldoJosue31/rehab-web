@@ -1,35 +1,49 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+// src/App.jsx
+import React, { useEffect, useRef } from "react";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import Login from "./pages/Login";
+import { useAuth } from "./contexts/AuthContext";
+import TherapistDashboard from "./pages/Dashboard";
 
-function App() {
-  const [count, setCount] = useState(0)
+// Protected route que exige rol Terapeuta (usa useEffect para redirigir una sola vez)
+function ProtectedTherapist({ children }) {
+  const { loading, user, profile } = useAuth();
+  const navigate = useNavigate();
+  const redirectedRef = useRef(false);
 
-  return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+  useEffect(() => {
+    if (loading) return;
+    if (!user || !profile || profile.rol !== "Terapeuta") {
+      if (!redirectedRef.current) {
+        redirectedRef.current = true;
+        navigate("/login", { replace: true });
+      }
+    } else {
+      redirectedRef.current = false;
+    }
+  }, [loading, user, profile, navigate]);
+
+  if (loading) return <div className="p-6">Comprobando sesión...</div>;
+  if (!user || !profile || profile.rol !== "Terapeuta") return null; // mientras redirige, no renderices nada
+
+  return children;
 }
 
-export default App
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="/dashboard"
+          element={
+            <ProtectedTherapist>
+              <TherapistDashboard />
+            </ProtectedTherapist>
+          }
+        />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
