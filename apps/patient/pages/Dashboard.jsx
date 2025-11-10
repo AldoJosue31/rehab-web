@@ -9,6 +9,7 @@ import {
   getDoc,
   doc,
 } from "firebase/firestore";
+import ClaimInvite from "../src/components/ClaimInvite";
 import { db } from "../src/firebaseClient";
 import { useAuth } from "../src/contexts/AuthContext";
 
@@ -161,6 +162,10 @@ export default function Dashboard() {
 
               <div className="bg-[#FFF8F3] border-t border-[#EAA48A]/20 px-3 md:px-8 py-4 md:py-6 rounded-b-xl shadow-sm">
                 <CalendarDays />
+              </div>
+
+              <div className="mt-4">
+                <ClaimInvite />
               </div>
             </div>
 

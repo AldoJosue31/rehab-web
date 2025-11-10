@@ -13,6 +13,7 @@ import {
   getDocs,
   orderBy,
 } from "firebase/firestore";
+import InvitePatient from "../components/InvitePatient";
 import { db } from "../firebaseClient"; // ajusta ruta si hace falta
 import { useAuth } from "../contexts/AuthContext";
 import TopBar from "../components/TopBar"; // si los tienes
@@ -288,6 +289,10 @@ export default function Dashboard() {
                 <div className="font-medium">Agregar ejercicio</div>
                 <div className="text-xs text-gray-500 mt-1">Nuevo ejercicio multimedia</div>
               </button>
+            </div>
+
+            <div className="mt-4">
+             <InvitePatient therapistId={user?.uid} />
             </div>
 
             <div className="mt-6">
