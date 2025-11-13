@@ -18,6 +18,9 @@ import { useAuth } from "../contexts/AuthContext";
 import TopBar from "../components/TopBar"; // si los tienes
 import Sidebar from "../components/Sidebar"; // si los tienes
 
+// NUEVO: componente para vincular por código (ver archivo a crear)
+import LinkPatientByCode from "../components/LinkPatientByCode";
+
 // Si no usas TopBar/Sidebar, puedes reemplazarlos por marcadores simples o eliminarlos.
 
 function SmallBadge({ children }) {
@@ -43,6 +46,10 @@ export default function Dashboard() {
   const [patients, setPatients] = useState([]);
   const [patientsLoading, setPatientsLoading] = useState(true);
   const [selectedPatient, setSelectedPatient] = useState(null);
+
+  // UI extras para panel pacientes
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [showLinkByCode, setShowLinkByCode] = useState(false);
 
   // Routines & exercises
   const [routines, setRoutines] = useState([]);
@@ -123,6 +130,8 @@ export default function Dashboard() {
       setView("patients");
       // seleccionar paciente nuevo
       setSelectedPatient({ id: docRef.id, ...payload });
+      // cerrar el formulario si estaba abierto
+      setShowAddForm(false);
     } catch (err) {
       console.error("handleAddPatient error:", err);
       setError("No se pudo añadir el paciente. Revisa consola.");
@@ -276,7 +285,7 @@ export default function Dashboard() {
           <div className="col-span-2 bg-white rounded-xl p-4 shadow-sm border">
             <h4 className="font-semibold mb-2">Acciones rápidas</h4>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <button onClick={() => setView("addPatient")} className="p-3 bg-indigo-50 border border-indigo-100 rounded-lg text-left">
+              <button onClick={() => setView("patients")} className="p-3 bg-indigo-50 border border-indigo-100 rounded-lg text-left">
                 <div className="font-medium">Añadir paciente</div>
                 <div className="text-xs text-gray-500 mt-1">Crear perfil y vincular</div>
               </button>
@@ -336,15 +345,48 @@ export default function Dashboard() {
     );
   }
 
-  // ---------- Patients list UI ----------
+  // ---------- Patients list UI (MODIFICADO) ----------
   function PatientsPanel() {
     return (
       <div>
         <SectionHeader title="Gestión de pacientes" subtitle="Añade, visualiza y administra pacientes" />
-        <div className="mb-4 flex gap-2">
-          <button onClick={() => setView("addPatient")} className="px-4 py-2 bg-indigo-600 text-white rounded">Añadir paciente</button>
-          <button onClick={() => setView("home")} className="px-4 py-2 border rounded">Volver al panel</button>
+        <div className="mb-4 flex gap-2 items-center">
+          {/* Botones: Añadir paciente (manual) / Vincular por código */}
+          <button
+            onClick={() => { setShowAddForm((s) => !s); setShowLinkByCode(false); }}
+            className={`px-4 py-2 rounded ${showAddForm ? "bg-indigo-600 text-white" : "border"}`}
+          >
+            Añadir paciente
+          </button>
+
+          <button
+            onClick={() => { setShowLinkByCode((s) => !s); setShowAddForm(false); }}
+            className={`px-4 py-2 rounded ${showLinkByCode ? "bg-emerald-600 text-white" : "border"}`}
+          >
+            Vincular paciente (por código)
+          </button>
+
+          <button onClick={() => setView("home")} className="px-4 py-2 border rounded ml-auto">Volver al panel</button>
         </div>
+
+        {/* Si el terapeuta abrió el formulario manual */}
+        {showAddForm && (
+          <div className="mb-4">
+            {/* Reutilizamos la función AddPatientForm definida más abajo (componente local) */}
+            <AddPatientForm />
+          </div>
+        )}
+
+        {/* Si el terapeuta abrió el panel para vincular por código */}
+        {showLinkByCode && (
+          <div className="mb-4">
+            <LinkPatientByCode therapistId={user?.uid} onLinked={(uid) => {
+              // abrir detalle del paciente vinculado y cerrar panel
+              openPatientDetail(uid);
+              setShowLinkByCode(false);
+            }} />
+          </div>
+        )}
 
         <div className="bg-white rounded-xl p-4 shadow-sm border">
           {patientsLoading ? (
@@ -373,7 +415,7 @@ export default function Dashboard() {
     );
   }
 
-  // ---------- AddPatient form ----------
+  // ---------- AddPatient form (local) ----------
   function AddPatientForm() {
     const [nombre, setNombre] = useState("");
     const [telefono, setTelefono] = useState("");
@@ -419,7 +461,7 @@ export default function Dashboard() {
 
             <div className="flex items-center gap-3">
               <button type="submit" disabled={busy} className="px-4 py-2 bg-indigo-600 text-white rounded">{busy ? "Guardando..." : "Guardar paciente"}</button>
-              <button type="button" onClick={() => setView("patients")} className="px-4 py-2 border rounded">Cancelar</button>
+              <button type="button" onClick={() => { setView("patients"); setShowAddForm(false); }} className="px-4 py-2 border rounded">Cancelar</button>
             </div>
 
             {error && <p className="text-sm text-rose-600 mt-2">{error}</p>}
@@ -636,40 +678,6 @@ export default function Dashboard() {
               ))}
             </div>
           )}
-        </div>
-      </div>
-    );
-  }
-
-  function CreateExerciseForm() {
-    const [nombre, setNombre] = useState("");
-    const [descripcion, setDescripcion] = useState("");
-    const [mediaText, setMediaText] = useState(""); // comma separated urls
-
-    return (
-      <div>
-        <SectionHeader title="Agregar ejercicio" subtitle="Crea un ejercicio con referencia visual (urls a imágenes/videos)" />
-        <div className="bg-white rounded-xl p-6 shadow-sm border max-w-2xl">
-          <form onSubmit={(e) => { e.preventDefault(); handleCreateExercise({ nombre, descripcion, media: mediaText.split(",").map(s => s.trim()).filter(Boolean) }); }} className="space-y-4">
-            <div>
-              <label className="block text-sm text-gray-600">Nombre</label>
-              <input required value={nombre} onChange={(e) => setNombre(e.target.value)} className="w-full border rounded px-4 py-2" />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-600">Descripción (opcional)</label>
-              <textarea value={descripcion} onChange={(e) => setDescripcion(e.target.value)} className="w-full border rounded px-4 py-2" rows={3} />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-600">URLs de media (coma separadas)</label>
-              <input value={mediaText} onChange={(e) => setMediaText(e.target.value)} className="w-full border rounded px-4 py-2" placeholder="https://... , https://..." />
-            </div>
-
-            <div className="flex gap-3">
-              <button type="submit" disabled={busy} className="px-4 py-2 bg-yellow-600 text-white rounded">{busy ? "Guardando..." : "Guardar ejercicio"}</button>
-              <button type="button" onClick={() => setView("exercises")} className="px-4 py-2 border rounded">Cancelar</button>
-            </div>
-            {error && <p className="text-sm text-rose-600 mt-2">{error}</p>}
-          </form>
         </div>
       </div>
     );
