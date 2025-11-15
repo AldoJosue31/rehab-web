@@ -8,6 +8,7 @@ import Login from "../pages/Login";
 import Dashboard from "../pages/Dashboard";
 import VerifyEmail from "../pages/VerifyEmail";
 import ResetPassword from "../pages/ResetPassword";
+import Profile from "../pages/Profile";
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/verify-email" element={<VerifyEmail />} />
+          <Route path="/perfil" element={<Profile />} />
 
           <Route
             path="/dashboard"
