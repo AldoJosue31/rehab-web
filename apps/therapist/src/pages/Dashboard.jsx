@@ -12,6 +12,8 @@ import {
   getDoc,
   getDocs,
   orderBy,
+  updateDoc,
+  deleteField
 } from "firebase/firestore";
 import { db } from "../firebaseClient"; // ajusta ruta si hace falta
 import { useAuth } from "../contexts/AuthContext";
@@ -60,27 +62,33 @@ export default function Dashboard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  // Fetch patients assigned to this therapist (or all if you want)
-  useEffect(() => {
-    setPatientsLoading(true);
-    // simplest: listen to patients collection where terapeuta_id == current uid OR all patients (depending on model).
-    // Here we fetch all patients and let therapist filter — adapt where needed.
-    const q = collection(db, "patients");
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-        setPatients(list);
-        setPatientsLoading(false);
-      },
-      (err) => {
-        console.warn("patients onSnapshot error:", err);
-        setPatients([]);
-        setPatientsLoading(false);
-      }
-    );
-    return () => unsub();
-  }, []);
+// Fetch patients assigned to this therapist
+useEffect(() => {
+  if (!user?.uid) {
+    setPatients([]);
+    setPatientsLoading(false);
+    return;
+  }
+
+  setPatientsLoading(true);
+  const q = query(collection(db, "patients"), where("created_by_terapeuta", "==", user.uid));
+  const unsub = onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      console.debug("[patients onSnapshot] got", list.length, "docs");
+      setPatients(list);
+      setPatientsLoading(false);
+    },
+    (err) => {
+      console.warn("patients onSnapshot error:", err);
+      setPatients([]);
+      setPatientsLoading(false);
+    }
+  );
+  return () => unsub();
+}, [user?.uid]);
+
 
   // Fetch routines & exercises (for create/assign)
   useEffect(() => {
@@ -395,25 +403,83 @@ export default function Dashboard() {
             <p className="text-sm text-gray-500">No hay pacientes aún.</p>
           ) : (
             <div className="space-y-3">
-              {patients.map((p) => (
-                <div key={p.id} className="p-3 border rounded flex items-center justify-between">
-                  <div>
-                    <div className="font-medium">{p.nombre_completo}</div>
-                    <div className="text-xs text-gray-500">{p.telefono_emergencia || "Sin teléfono"}</div>
-                    <div className="text-xs text-gray-400 mt-1">Tutor: {p.nombre_tutor || "—"}</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => openPatientDetail(p.id)} className="px-3 py-1 bg-indigo-50 border rounded text-sm">Ver</button>
-                    <button onClick={() => assignRoutineToPatient({ pacienteId: p.id, rutinaId: (routines[0]?.id || null) })} className="px-3 py-1 bg-emerald-50 border rounded text-sm">Asignar rutina</button>
-                  </div>
-                </div>
-              ))}
+{patients.map((p) => (
+  <div key={p.id} className="p-3 border rounded flex items-center justify-between">
+    <div>
+      <div className="font-medium">{p.nombre_completo}</div>
+      <div className="text-xs text-gray-500">{p.telefono_emergencia || "Sin teléfono"}</div>
+      <div className="text-xs text-gray-400 mt-1">Tutor: {p.nombre_tutor || "—"}</div>
+    </div>
+
+    <div className="flex items-center gap-2">
+      <button
+        onClick={() => openPatientDetail(p.id)}
+        className="px-3 py-1 bg-indigo-50 border rounded text-sm"
+      >
+        Ver
+      </button>
+
+      <button
+        onClick={() => assignRoutineToPatient({ pacienteId: p.id, rutinaId: (routines[0]?.id || null) })}
+        className="px-3 py-1 bg-emerald-50 border rounded text-sm"
+      >
+        Asignar rutina
+      </button>
+
+<button
+  onClick={() => {
+    const ok = window.confirm(`¿Desvincular al paciente "${p.nombre_completo}"? Esta acción quitará la relación con el terapeuta.`);
+    if (ok) handleUnlinkPatient(p.id);
+  }}
+  disabled={busy}
+  className={`px-3 py-1 border rounded text-sm ${busy ? "opacity-50 cursor-not-allowed" : "bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100"}`}
+>
+  Desvincular
+</button>
+    </div>
+  </div>
+))}
+
             </div>
           )}
         </div>
       </div>
     );
   }
+
+  // ---------- Unlink / Desvincular paciente ----------
+async function handleUnlinkPatient(patientId) {
+  console.debug("[handleUnlinkPatient] start", { patientId, therapistId: user?.uid });
+  setError("");
+  setBusy(true);
+  try {
+    if (!user?.uid) throw new Error("Usuario no autenticado.");
+
+    const ref = doc(db, "patients", patientId);
+
+    // elimina campos de vinculación (ajusta nombres si usas otros campos)
+    await updateDoc(ref, {
+      terapeuta_id: deleteField(),
+      created_by_terapeuta: deleteField(),
+      linked_at: deleteField()
+    });
+
+    console.debug("[handleUnlinkPatient] success", { patientId });
+    // si el detalle del paciente estaba abierto, ciérralo
+    if (selectedPatient?.id === patientId) {
+      setSelectedPatient(null);
+      setView("patients");
+    }
+
+    setBusy(false);
+  } catch (err) {
+    console.error("handleUnlinkPatient error:", err);
+    setError(err?.message || "No se pudo desvincular al paciente. Revisa la consola.");
+    setBusy(false);
+  }
+}
+
+
 
   // ---------- AddPatient form (local) ----------
   function AddPatientForm() {
