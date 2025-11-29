@@ -15,6 +15,7 @@ import {
 import {
   doc,
   setDoc,
+  getDoc,           // <-- agregar
   serverTimestamp,
   runTransaction,
 } from "firebase/firestore";
@@ -93,32 +94,76 @@ export default function Login() {
    * - emails.create sólo permitido por request.auth.uid == uid
    * - users.create exige que get(emails/{email_normalized}).data.uid == userId
    */
-  const createEmailMappingAndUser = useCallback(async (uid, emailRaw, userMinimalPayload, userExtraPayload = {}) => {
-    const emailId = normalizeEmail(emailRaw);
-    const emailRef = doc(db, "emails", emailId);
-    const userRef = doc(db, "users", uid);
+const createEmailMappingAndUser = useCallback(async (uid, emailRaw, userMinimalPayload, userExtraPayload = {}) => {
+  const emailId = normalizeEmail(emailRaw);
+  if (!emailId) throw new Error("INVALID_EMAIL");
+  const emailRef = doc(db, "emails", emailId);
+  const userRef = doc(db, "users", uid);
 
-    await runTransaction(db, async (tx) => {
-      const emailSnap = await tx.get(emailRef);
-      if (emailSnap.exists()) {
-        // otro uid ya registró este email
-        throw new Error("EMAIL_ALREADY_REGISTERED");
-      }
+  console.debug("[createEmailMappingAndUser] start", { uid, emailId });
 
-      // 1) crear mapping emails/{emailId} -> { uid }
-      tx.set(emailRef, { uid }, { merge: false });
+  // Forzar token y un pequeño delay para dejar que rules vean el nuevo token
+  try { await auth.currentUser?.getIdToken(true); } catch (t) { console.warn("token refresh fallo (ignored):", t); }
+  await new Promise((r) => setTimeout(r, 300));
 
-      // 2) crear users/{uid} con payload mínimo + email_normalized (para reglas)
-      tx.set(userRef, {
-        ...userMinimalPayload,
-        email_normalized: emailId,
-        ...userExtraPayload,
-      }, { merge: false });
-    });
+  // payload para user
+  const payload = {
+    ...userMinimalPayload,
+    email_normalized: emailId,
+    ...userExtraPayload
+  };
 
-    // refrescar profile local (AuthContext)
+  // 1) Intento rápido: setDoc users/{uid} directamente (si el token contiene email correcto, esto suele funcionar)
+  try {
+    await setDoc(userRef, payload, { merge: true });
     try { await refreshProfile(uid); } catch (_) {}
-  }, [refreshProfile]);
+    console.debug("[createEmailMappingAndUser] setDoc users success (fast path)", { uid });
+    return;
+  } catch (fastErr) {
+    // si falla por permission-denied o similar, seguimos al fallback transaccional
+    console.warn("[createEmailMappingAndUser] fast setDoc failed, fallback to transaction:", fastErr?.code || fastErr?.message || fastErr);
+  }
+
+  // 2) Fallback: transacción segura que crea/actualiza emails mapping y users doc
+  await runTransaction(db, async (tx) => {
+    const emailSnap = await tx.get(emailRef);
+
+    if (!emailSnap.exists()) {
+      // mapping ausente -> crear mapping y users doc (merge)
+      tx.set(emailRef, { uid }, { merge: false });
+      tx.set(userRef, payload, { merge: true });
+      return;
+    }
+
+    const emailData = emailSnap.data();
+    const existingUid = emailData?.uid;
+
+    if (existingUid === uid) {
+      // mapping ya apunta a este uid -> sólo crear/mergear users doc
+      tx.set(userRef, payload, { merge: true });
+      return;
+    }
+
+    // mapping apunta a otro uid -> verificar si ese otro tiene users doc
+    const otherUserRef = doc(db, "users", existingUid);
+    const otherUserSnap = await tx.get(otherUserRef);
+    if (otherUserSnap.exists()) {
+      // mapping legítimo para otro usuario -> conflicto
+      throw new Error("EMAIL_ALREADY_REGISTERED");
+    }
+
+    // Orphan mapping: reclamarlo (el other uid no tiene users doc)
+    tx.set(emailRef, { uid }, { merge: false });
+    tx.set(userRef, payload, { merge: true });
+    return;
+  });
+
+  try { await refreshProfile(uid); } catch (e) { console.warn("refreshProfile fallo (ignored):", e); }
+
+  console.debug("[createEmailMappingAndUser] done (transactional path)", { uid, emailId });
+}, [refreshProfile]);
+
+
 
   // SAFE: si las reglas no permiten escribir campos extra, primero intentamos la transacción
   // y si falla por permisos distintos a EMAIL_ALREADY_REGISTERED, lo manejamos arriba.
@@ -282,73 +327,146 @@ export default function Login() {
   }
 
   // Google sign-in: abrir popup y redirigir al formulario de signup con datos rellenados
-  async function handleGoogle() {
-    setError("");
-    setLoading(true);
-
-    try {
-      const res = await signInWithPopup(auth, provider);
-      const u = res.user;
-
-      // Forzar token por si hay race con reglas
-      try { if (auth.currentUser) await auth.currentUser.getIdToken(true); } catch (t) { console.warn("token refresh fallo:", t); }
-
-      // Prefill form and lock email
-      setMode("signup");
-      setGoogleSignup(true);
-      setEmail(u.email || "");
-      setDisplayName(u.displayName || "");
-      setEmailLocked(true);
+async function handleGoogle() {
+  setError("");
+  setLoading(true);
+  try {
+    const res = await signInWithPopup(auth, provider);
+    const u = res?.user;
+    if (!u) {
+      setError("No se obtuvo usuario del proveedor.");
       setLoading(false);
       return;
-    } catch (err) {
-      console.warn("signInWithPopup fallo:", err);
-      if (err?.code === "auth/popup-closed-by-user") {
-        setError("Cerraste la ventana del proveedor antes de completar.");
+    }
+
+    // forzar token y pequeña espera para evitar race con rules
+    try { await auth.currentUser?.getIdToken(true); } catch (_) {}
+    await new Promise((r) => setTimeout(r, 250));
+
+    console.debug("[handleGoogle] signed in", { uid: u.uid, email: u.email });
+
+    // 1) Si existe users/{uid} -> entrar directo
+    try {
+      const userSnap = await getDoc(doc(db, "users", u.uid));
+      if (userSnap.exists()) {
+        try { await refreshProfile(u.uid); } catch (_) {}
+        navigate("/dashboard");
         setLoading(false);
         return;
       }
-      // fallback redirect flow
-      try {
-        await signInWithRedirect(auth, provider);
-      } catch (rErr) {
-        console.error("signInWithRedirect error:", rErr);
-        setError(mapAuthError(rErr?.code));
-        setLoading(false);
+    } catch (cErr) {
+      console.warn("Error comprobando users/{uid}:", cErr);
+    }
+
+    // 2) comprobar emails index por conflictos (si emails/{normalized} existe y apunta a otro uid con users doc -> error)
+    try {
+      const normalized = normalizeEmail(u.email || "");
+      if (normalized) {
+        const emailSnap = await getDoc(doc(db, "emails", normalized));
+        if (emailSnap.exists()) {
+          const data = emailSnap.data();
+          if (data?.uid && data.uid !== u.uid) {
+            const otherUserSnap = await getDoc(doc(db, "users", data.uid));
+            if (otherUserSnap.exists()) {
+              setError("Ese correo ya está registrado en otra cuenta. Usa ese inicio de sesión o contacta soporte.");
+              try { await signOut(auth); } catch (_) {}
+              setLoading(false);
+              return;
+            }
+            // else: orphan -> permitimos que el flujo de completado reclame más tarde
+          }
+        }
       }
+    } catch (e) {
+      console.warn("Error comprobando emails index:", e);
+    }
+
+    // 3) abrir formulario de completar signup (prefill)
+    setMode("signup");
+    setGoogleSignup(true);
+    setEmail(u.email || "");
+    setDisplayName(u.displayName || "");
+    setEmailLocked(true);
+    setLoading(false);
+    return;
+  } catch (err) {
+    console.warn("signInWithPopup fallo:", err);
+    const code = err?.code;
+    if (code === "auth/popup-closed-by-user" || code === "auth/popup-blocked") {
+      setError(mapAuthError(code));
+      setLoading(false);
+      return;
+    }
+    try {
+      await signInWithRedirect(auth, provider);
+    } catch (rErr) {
+      console.error("signInWithRedirect error:", rErr);
+      setError(mapAuthError(rErr?.code) || "No se pudo iniciar con Google.");
+      setLoading(false);
     }
   }
+}
+
+
 
   // Redirect result handler (similar behavior: prefill and lock email)
-  useEffect(() => {
-    let mounted = true;
-    async function handleRedirectResult() {
-      setLoading(true);
-      try {
-        const result = await getRedirectResult(auth);
-        if (result && result.user) {
-          const u = result.user;
-          try { if (auth.currentUser) await auth.currentUser.getIdToken(true); } catch (_) {}
-          if (!mounted) return;
+useEffect(() => {
+  let mounted = true;
+  async function handleRedirectResult() {
+    setLoading(true);
+    try {
+      const result = await getRedirectResult(auth);
+      if (result && result.user) {
+        const u = result.user;
+        try { await auth.currentUser?.getIdToken(true); } catch (_) {}
+        await new Promise((r) => setTimeout(r, 250));
 
-          setMode("signup");
-          setGoogleSignup(true);
-          setEmail(u.email || "");
-          setDisplayName(u.displayName || "");
-          setEmailLocked(true);
+        // si users/{uid} existe -> entrar
+        const userSnap = await getDoc(doc(db, "users", u.uid));
+        if (userSnap.exists()) {
+          try { await refreshProfile(u.uid); } catch (_) {}
+          if (!mounted) return;
+          navigate("/dashboard");
           setLoading(false);
+          return;
         }
-      } catch (err) {
-        // no es fatal si no hay resultado
-        console.log("getRedirectResult:", err?.code || err?.message || err);
-      } finally {
-        if (mounted) setLoading(false);
+
+        // check emails mapping conflicto
+        const normalized = normalizeEmail(u.email || "");
+        if (normalized) {
+          const emailSnap = await getDoc(doc(db, "emails", normalized));
+          if (emailSnap.exists()) {
+            const d = emailSnap.data();
+            if (d?.uid && d.uid !== u.uid) {
+              const otherUserSnap = await getDoc(doc(db, "users", d.uid));
+              if (otherUserSnap.exists()) {
+                setError("Ese correo ya está registrado en otra cuenta. Usa ese inicio de sesión o contacta soporte.");
+                try { await signOut(auth); } catch (_) {}
+                setLoading(false);
+                return;
+              }
+            }
+          }
+        }
+
+        setMode("signup");
+        setGoogleSignup(true);
+        setEmail(u.email || "");
+        setDisplayName(u.displayName || "");
+        setEmailLocked(true);
+        setLoading(false);
       }
+    } catch (err) {
+      console.log("getRedirectResult:", err?.code || err?.message || err);
+    } finally {
+      if (mounted) setLoading(false);
     }
-    handleRedirectResult();
-    return () => { mounted = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }
+  handleRedirectResult();
+  return () => { mounted = false; };
+}, [/* si usas refreshProfile añádelo aquí */]);
+
+
 
   // Si el usuario cambia manualmente a "login", limpiamos estados google
   useEffect(() => {

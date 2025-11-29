@@ -70,15 +70,49 @@ useEffect(() => {
     return;
   }
 
-  setPatientsLoading(true);
+   setPatientsLoading(true);
   const q = query(collection(db, "patients"), where("created_by_terapeuta", "==", user.uid));
   const unsub = onSnapshot(
     q,
     (snap) => {
       const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       console.debug("[patients onSnapshot] got", list.length, "docs");
-      setPatients(list);
-      setPatientsLoading(false);
+
+      // preparar lista de uids a consultar (usa paciente_uid si existe, si no usamos el id del doc)
+      const uids = Array.from(new Set(list.map((p) => p.paciente_uid || p.id).filter(Boolean)));
+
+      if (uids.length === 0) {
+        setPatients(list.map(p => ({ ...p, email: "" })));
+        setPatientsLoading(false);
+        return;
+      }
+
+      // obtener users/{uid} en paralelo y mapear emails
+      Promise.all(uids.map((uid) => getDoc(doc(db, "users", uid))))
+        .then((userSnaps) => {
+          const emailMap = {};
+          userSnaps.forEach((s) => {
+            if (s.exists()) {
+              const d = s.data();
+              // intenta varias propiedades por si usas distintas llaves
+              emailMap[s.id] = d.email || d.email_normalized || d.email_normalizado || "";
+            }
+          });
+
+          const enriched = list.map((p) => {
+            const uidToCheck = p.paciente_uid || p.id;
+            return { ...p, email: emailMap[uidToCheck] || "" };
+          });
+
+          setPatients(enriched);
+          setPatientsLoading(false);
+        })
+        .catch((err) => {
+          console.warn("Error fetching user emails for patients:", err);
+          // fallback: guardar la lista sin emails
+          setPatients(list.map(p => ({ ...p, email: "" })));
+          setPatientsLoading(false);
+        });
     },
     (err) => {
       console.warn("patients onSnapshot error:", err);
@@ -148,111 +182,215 @@ useEffect(() => {
   }
 
   // ---------- Patients: open detail ----------
-  async function openPatientDetail(patientId) {
-    setError("");
-    setBusy(true);
-    try {
-      const snap = await getDoc(doc(db, "patients", patientId));
-      if (!snap.exists()) {
-        setError("Paciente no encontrado.");
-        setBusy(false);
-        return;
-      }
-      const data = { id: snap.id, ...snap.data() };
-      // load additional info: historial de sesiones, asignaciones, rutinas etc.
-      // ejemplo: sesiones donde paciente_id == patientId
-      const sesionesQ = query(collection(db, "sesiones"), where("paciente_id", "==", patientId), orderBy("fecha_completada", "desc"));
-      const sesionesSnap = await getDocs(sesionesQ);
-      const sesiones = sesionesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-
-      // rutinas asignadas (asignaciones)
-      const asigQ = query(collection(db, "asignaciones"), where("paciente_id", "==", patientId));
-      const asigSnap = await getDocs(asigQ);
-      const asignaciones = asigSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-
-      setSelectedPatient({ ...data, sesiones, asignaciones });
-      setView("patientDetail");
-    } catch (err) {
-      console.error("openPatientDetail error:", err);
-      setError("Error cargando detalle de paciente.");
-    } finally {
+async function openPatientDetail(patientId) {
+  setError("");
+  setBusy(true);
+  try {
+    const snap = await getDoc(doc(db, "patients", patientId));
+    if (!snap.exists()) {
+      setError("Paciente no encontrado.");
       setBusy(false);
+      return;
     }
+    const data = { id: snap.id, ...snap.data() };
+
+    // obtener email desde users/{uid} si existe paciente_uid o el id del patient es uid
+    try {
+      const uidToFetch = data.paciente_uid || data.id;
+      if (uidToFetch) {
+        const userSnap = await getDoc(doc(db, "users", uidToFetch));
+        if (userSnap.exists()) {
+          const ud = userSnap.data();
+          data.email = ud.email || ud.email_normalized || ud.email_normalizado || "";
+        } else {
+          data.email = "";
+        }
+      } else {
+        data.email = "";
+      }
+    } catch (err) {
+      console.warn("Error fetching users/{uid} for patient detail:", err);
+      data.email = "";
+    }
+
+    // load additional info: historial de sesiones, asignaciones, rutinas etc.
+    const sesionesQ = query(collection(db, "sesiones"), where("paciente_id", "==", patientId), orderBy("fecha_completada", "desc"));
+    const sesionesSnap = await getDocs(sesionesQ);
+    const sesiones = sesionesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+    const asigQ = query(collection(db, "asignaciones"), where("paciente_id", "==", patientId));
+    const asigSnap = await getDocs(asigQ);
+    const asignaciones = asigSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+    setSelectedPatient({ ...data, sesiones, asignaciones });
+    setView("patientDetail");
+  } catch (err) {
+    console.error("openPatientDetail error:", err);
+    setError("Error cargando detalle de paciente.");
+  } finally {
+    setBusy(false);
   }
+}
 
   // ---------- Create routine ----------
-  async function handleCreateRoutine(form) {
-    setBusy(true);
-    setError("");
-    try {
-      const payload = {
-        nombre: form.nombre,
-        sesiones: Number(form.sesiones) || 1,
-        duracion_minutos: Number(form.duracion) || 10,
-        recomendaciones: form.recomendaciones || "",
-        ejercicios_ids: form.ejercicios || [],
-        owner: user?.uid || null,
-        created_at: serverTimestamp(),
-      };
-      const docRef = await addDoc(collection(db, "routines"), payload);
+async function handleCreateRoutine(form) {
+  setBusy(true);
+  setError("");
+  try {
+    // Validaciones mínimas
+    if (!form.nombre || form.nombre.trim().length < 3) {
+      setError("Nombre de rutina inválido.");
       setBusy(false);
-      // ir a lista de rutinas o detalle
-      setView("routines");
-      // optional: navigate to routine detail
-      console.log("Routine created:", docRef.id);
-    } catch (err) {
-      console.error("handleCreateRoutine error:", err);
-      setError("No se pudo crear la rutina.");
-      setBusy(false);
+      return;
     }
+
+    // construye el payload consistente con tu ejemplo
+    const payload = {
+      nombre: form.nombre,
+      descripcion: form.descripcion || "",
+      nivel_dificultad: (form.nivel_dificultad || "BAJO").toUpperCase(),
+      ejercicios: Array.isArray(form.ejercicios) ? form.ejercicios : (form.ejercicios ? [form.ejercicios] : []), // array de ids
+      owner: user?.uid || null,
+      terapeuta_creador_id: user?.uid || null,
+      created_at: serverTimestamp(),
+    };
+
+    // crear doc con id auto
+    const docRef = await addDoc(collection(db, "routines"), payload);
+
+    // guardar campo id dentro del documento por conveniencia (opcional pero útil)
+    await setDoc(doc(db, "routines", docRef.id), { id: docRef.id }, { merge: true });
+
+    // registra auditoría básica
+    try {
+      await addDoc(collection(db, "auditoria"), {
+        accion: "RutinaCreada",
+        entidad_afectada: "routines",
+        entidad_id: docRef.id,
+        usuario_id: user?.uid || null,
+        datos_nuevos: payload,
+        datos_previos: null,
+        timestamp: serverTimestamp(),
+      });
+    } catch (auditErr) {
+      console.warn("Auditoría falla (se ignora):", auditErr);
+    }
+
+    setBusy(false);
+    setView("routines");
+    // opcional: refrescar lista o navegar a detalle
+    return docRef.id;
+  } catch (err) {
+    console.error("handleCreateRoutine error:", err);
+    setError("No se pudo crear la rutina. Revisa consola.");
+    setBusy(false);
   }
+}
+
 
   // ---------- Create exercise ----------
-  async function handleCreateExercise(form) {
-    setBusy(true);
-    setError("");
-    try {
-      const payload = {
-        nombre: form.nombre,
-        media: form.media || [], // array de urls
-        descripcion: form.descripcion || "",
-        created_by: user?.uid || null,
-        created_at: serverTimestamp(),
-      };
-      await addDoc(collection(db, "ejercicios"), payload);
+async function handleCreateExercise(form) {
+  setBusy(true);
+  setError("");
+  try {
+    if (!form.nombre || form.nombre.trim().length < 2) {
+      setError("Nombre de ejercicio inválido.");
       setBusy(false);
-      setView("exercises");
-    } catch (err) {
-      console.error("handleCreateExercise error:", err);
-      setError("No se pudo crear el ejercicio.");
-      setBusy(false);
+      return;
     }
+
+    // normalizar a tipos numéricos cuando tenga sentido
+    const payload = {
+      nombre: form.nombre,
+      description: form.description || form.descripcion || "",
+      repeticiones: form.repeticiones ? Number(form.repeticiones) : null,
+      series: form.series ? Number(form.series) : null,
+      tiempo_segundos: form.tiempo_segundos ? Number(form.tiempo_segundos) : null,
+      url_video: form.url_video || "",
+      created_by: user?.uid || null,
+      created_at: serverTimestamp(),
+    };
+
+    const docRef = await addDoc(collection(db, "ejercicios"), payload);
+    // establecer id en documento
+    await setDoc(doc(db, "ejercicios", docRef.id), { id: docRef.id }, { merge: true });
+
+    // auditoría
+    try {
+      await addDoc(collection(db, "auditoria"), {
+        accion: "EjercicioCreado",
+        entidad_afectada: "ejercicios",
+        entidad_id: docRef.id,
+        usuario_id: user?.uid || null,
+        datos_nuevos: payload,
+        datos_previos: null,
+        timestamp: serverTimestamp(),
+      });
+    } catch (_) {}
+
+    setBusy(false);
+    setView("exercises");
+    return docRef.id;
+  } catch (err) {
+    console.error("handleCreateExercise error:", err);
+    setError("No se pudo crear el ejercicio.");
+    setBusy(false);
   }
+}
+
 
   // ---------- Assign routine to patient (helper) ----------
-  async function assignRoutineToPatient({ pacienteId, rutinaId, sesiones = 1 }) {
-    setBusy(true);
-    setError("");
+async function assignRoutineToPatient({ pacienteId, rutinaId, sesiones = 1 }) {
+  setBusy(true);
+  setError("");
+  try {
+    if (!user?.uid) throw new Error("Usuario no autenticado.");
+    if (!pacienteId || !rutinaId) throw new Error("Paciente o rutina inválida.");
+
+    // asegúrate de convertir sesiones a número
+    const expected = Number(sesiones) || 1;
+
+    const payload = {
+      paciente_id: pacienteId,
+      rutina_id: rutinaId,
+      terapeuta_asignador_id: user.uid,
+      fecha_asignacion: serverTimestamp(),
+      expectedSessions: expected,
+      progreso: 0,
+      estado: "Asignada", // o "En progreso" dependiendo flujo
+    };
+
+    const asignRef = await addDoc(collection(db, "asignaciones"), payload);
+
+    // auditoría
     try {
-      const payload = {
-        paciente_id: pacienteId,
-        rutina_id: rutinaId,
-        terapeuta_asignador_id: user?.uid || null,
-        fecha_asignacion: serverTimestamp(),
-        sesiones_programadas: Number(sesiones) || 1,
-        estado: "Asignada",
-        progreso: 0,
-      };
-      await addDoc(collection(db, "asignaciones"), payload);
-      setBusy(false);
-      // reload patient detail if open
-      if (selectedPatient?.id === pacienteId) openPatientDetail(pacienteId);
-    } catch (err) {
-      console.error("assignRoutine error:", err);
-      setError("No se pudo asignar la rutina.");
-      setBusy(false);
+      await addDoc(collection(db, "auditoria"), {
+        accion: "AsignacionCreada",
+        entidad_afectada: "asignaciones",
+        entidad_id: asignRef.id,
+        usuario_id: user.uid,
+        datos_nuevos: payload,
+        datos_previos: null,
+        timestamp: serverTimestamp(),
+      });
+    } catch (auditErr) {
+      console.warn("Auditoría fallo (ignorado):", auditErr);
     }
+
+    // refrescar detalle paciente si está abierto
+    if (selectedPatient?.id === pacienteId) {
+      await openPatientDetail(pacienteId);
+    }
+
+    setBusy(false);
+    return asignRef.id;
+  } catch (err) {
+    console.error("assignRoutineToPatient error:", err);
+    setError(err?.message || "No se pudo asignar la rutina.");
+    setBusy(false);
   }
+}
+
 
   // Simple "progress chart" component (weeks)
   function ProgressChart({ sesiones = [] }) {
@@ -407,7 +545,7 @@ useEffect(() => {
   <div key={p.id} className="p-3 border rounded flex items-center justify-between">
     <div>
       <div className="font-medium">{p.nombre_completo}</div>
-      <div className="text-xs text-gray-500">{p.telefono_emergencia || "Sin teléfono"}</div>
+      <div className="text-xs text-gray-500">{p.email ? p.email : (p.telefono_emergencia || "Sin teléfono")}</div>
       <div className="text-xs text-gray-400 mt-1">Tutor: {p.nombre_tutor || "—"}</div>
     </div>
 
@@ -419,12 +557,27 @@ useEffect(() => {
         Ver
       </button>
 
-      <button
-        onClick={() => assignRoutineToPatient({ pacienteId: p.id, rutinaId: (routines[0]?.id || null) })}
-        className="px-3 py-1 bg-emerald-50 border rounded text-sm"
-      >
-        Asignar rutina
-      </button>
+<button
+  onClick={() => {
+    if (!routines || routines.length === 0) return alert("No hay rutinas disponibles.");
+    // crear lista corta para elegir
+    const list = routines.map((r, i) => `${i+1}. ${r.nombre} (id:${r.id})`).join("\n");
+    const choice = window.prompt(`Elige rutina (escribe el número):\n${list}\n\nO escribe el id de la rutina:`);
+    if (!choice) return;
+    let rutinaId = null;
+    const n = Number(choice);
+    if (!Number.isNaN(n) && n >= 1 && n <= routines.length) rutinaId = routines[n-1].id;
+    else rutinaId = choice.trim();
+    if (!rutinaId) return alert("Rutina inválida.");
+    const sessions = window.prompt("¿Cuántas sesiones esperadas? (número)", "5");
+    if (!sessions) return;
+    assignRoutineToPatient({ pacienteId: p.id, rutinaId, sesiones: Number(sessions) });
+  }}
+  className="px-3 py-1 bg-emerald-50 border rounded text-sm"
+>
+  Asignar rutina
+</button>
+
 
 <button
   onClick={() => {
@@ -547,6 +700,7 @@ async function handleUnlinkPatient(patientId) {
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-2xl font-semibold">{p.nombre_completo}</h2>
+            <div className="text-sm text-gray-500">Email: {p.email || "—"}</div>
             <div className="text-sm text-gray-500">Teléfono: {p.telefono_emergencia || "—"}</div>
             <div className="text-sm text-gray-500">Tutor: {p.nombre_tutor || "—"}</div>
           </div>
