@@ -19,9 +19,10 @@ import { db } from "../firebaseClient"; // ajusta ruta si hace falta
 import { useAuth } from "../contexts/AuthContext";
 import TopBar from "../components/TopBar"; // si los tienes
 import Sidebar from "../components/Sidebar"; // si los tienes
-
+import CreateExercise from "../components/CreateExercise";
 // NUEVO: componente para vincular por código (ver archivo a crear)
 import LinkPatientByCode from "../components/LinkPatientByCode";
+
 
 // Si no usas TopBar/Sidebar, puedes reemplazarlos por marcadores simples o eliminarlos.
 
@@ -43,7 +44,7 @@ export default function Dashboard() {
 
   // UI state: "home" | "patients" | "addPatient" | "patientDetail" | "routines" | "createRoutine" | "exercises" | "createExercise"
   const [view, setView] = useState("home");
-
+const [selectedExercise, setSelectedExercise] = useState(null);
   // Patients
   const [patients, setPatients] = useState([]);
   const [patientsLoading, setPatientsLoading] = useState(true);
@@ -231,6 +232,33 @@ async function openPatientDetail(patientId) {
     setBusy(false);
   }
 }
+
+async function openExerciseDetail(exerciseId) {
+  setError("");
+  setBusy(true);
+  try {
+    if (!exerciseId) throw new Error("Id de ejercicio inválido.");
+    const snap = await getDoc(doc(db, "ejercicios", exerciseId));
+    if (!snap.exists()) {
+      setError("Ejercicio no encontrado.");
+      setBusy(false);
+      return;
+    }
+    const data = { id: snap.id, ...snap.data() };
+    // normalizar campos opcionales
+    data.repeticiones = data.repeticiones ?? data.reps ?? null;
+    data.series = data.series ?? null;
+    data.tiempo_segundos = data.tiempo_segundos ?? data.tiempo ?? null;
+    setSelectedExercise(data);
+    setView("exerciseDetail");
+  } catch (err) {
+    console.error("openExerciseDetail error:", err);
+    setError("Error cargando detalle de ejercicio.");
+  } finally {
+    setBusy(false);
+  }
+}
+
 
   // ---------- Create routine ----------
 async function handleCreateRoutine(form) {
@@ -761,6 +789,81 @@ async function handleUnlinkPatient(patientId) {
     );
   }
 
+  function ExerciseDetail() {
+  if (!selectedExercise) return <p>Selecciona un ejercicio</p>;
+  const e = selectedExercise;
+
+  const formatDate = (ts) => {
+    try {
+      return ts?.toDate ? ts.toDate().toLocaleString() : (ts ? String(ts) : "—");
+    } catch {
+      return "—";
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-start justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold">{e.nombre}</h2>
+          <div className="text-sm text-gray-500 mt-1">ID: <span className="font-mono text-xs">{e.id}</span></div>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => setView("exercises")} className="px-3 py-1 border rounded">Volver</button>
+          {/* Si quieres editar más adelante, puedes añadir botón Editar aquí */}
+        </div>
+      </div>
+
+      <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="col-span-2 bg-white rounded-xl p-4 shadow-sm border">
+          <h4 className="font-medium mb-2">Descripción</h4>
+          <div className="text-sm text-gray-700 mb-4">{e.description || e.descripcion || "—"}</div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <div className="text-xs text-gray-500">Repeticiones</div>
+              <div className="font-medium">{e.repeticiones ?? "—"}</div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">Series</div>
+              <div className="font-medium">{e.series ?? "—"}</div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">Tiempo (s)</div>
+              <div className="font-medium">{e.tiempo_segundos ?? "—"}</div>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <div className="text-xs text-gray-500">Video / Media</div>
+            <div className="mt-2 space-y-1">
+              {(e.url_video ? [e.url_video] : []).concat(e.media || []).filter(Boolean).map((u, i) => (
+                <a key={i} href={u} target="_blank" rel="noreferrer" className="block text-sm text-indigo-600 underline">{u}</a>
+              ))}
+              {/* si no hay media mostramos mensaje */}
+              {(!((e.media || []).length || e.url_video)) && <div className="text-sm text-gray-500">No hay media disponible.</div>}
+            </div>
+          </div>
+
+          <div className="mt-6 text-xs text-gray-500">
+            <div>Creado por: {e.created_by || "—"}</div>
+            <div>Creado: {formatDate(e.created_at)}</div>
+          </div>
+        </div>
+
+        <aside className="bg-white rounded-xl p-4 shadow-sm border">
+          <h5 className="font-medium mb-2">Acciones</h5>
+          <div className="flex flex-col gap-2">
+            <button onClick={() => { /* más acciones: copiar id, editar, eliminar */ }} className="px-3 py-2 border rounded text-left">Copiar ID</button>
+            <button onClick={() => setView("createExercise")} className="px-3 py-2 bg-yellow-50 border rounded text-left">Agregar nuevo</button>
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+
   // ---------- Routines panel ----------
   function RoutinesPanel() {
     return (
@@ -885,17 +988,27 @@ async function handleUnlinkPatient(patientId) {
             <p className="text-sm text-gray-500">No hay ejercicios.</p>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {exercises.map((ex) => (
-                <div key={ex.id} className="p-3 border rounded">
-                  <div className="font-medium">{ex.nombre}</div>
-                  <div className="text-xs text-gray-500 mt-1">{ex.descripcion}</div>
-                  <div className="flex gap-2 mt-2">
-                    {(ex.media || []).slice(0, 2).map((m, i) => (
-                      <a key={i} href={m} target="_blank" rel="noreferrer" className="text-xs text-indigo-600 underline">Media {i + 1}</a>
-                    ))}
-                  </div>
-                </div>
-              ))}
+{exercises.map((ex) => (
+  <div key={ex.id} className="p-3 border rounded">
+    <div className="font-medium">{ex.nombre}</div>
+    <div className="text-xs text-gray-500 mt-1">{ex.description || ex.descripcion || ""}</div>
+    <div className="text-xs text-gray-500 mt-1">
+      {ex.repeticiones ? `Reps: ${ex.repeticiones}` : ""} {ex.series ? ` • Series: ${ex.series}` : ""} {ex.tiempo_segundos ? ` • Tiempo: ${ex.tiempo_segundos}s` : ""}
+    </div>
+    <div className="flex gap-2 mt-2">
+      {(ex.media || ex.urls || []).slice(0, 2).map((m, i) => (
+        <a key={i} href={m} target="_blank" rel="noreferrer" className="text-xs text-indigo-600 underline">Media {i + 1}</a>
+      ))}
+      <button
+        onClick={() => openExerciseDetail(ex.id)}
+        className="px-3 py-1 border rounded text-sm bg-indigo-50"
+      >
+        Detalle
+      </button>
+    </div>
+  </div>
+))}
+
             </div>
           )}
         </div>
@@ -910,7 +1023,15 @@ async function handleUnlinkPatient(patientId) {
       <TopBar user={{ ...user, ...profile }} />
 
       <div className="flex flex-col md:flex-row">
-        {Sidebar ? <div className="w-full md:w-64"><Sidebar /></div> : (
+        {Sidebar ? (
+  <div className="w-full md:w-64">
+    <Sidebar onNavigate={(key) => {
+      // Si quieres mapear keys a vistas diferentes, hazlo aquí
+      // usamos key tal cual porque coincide con tus vistas
+      setView(key);
+    }} />
+  </div>
+) : (
           <nav className="w-full md:w-56 bg-white p-4 border-r">
             <div className="space-y-2">
               <button onClick={() => setView("home")} className={`w-full text-left px-3 py-2 rounded ${view === "home" ? "bg-indigo-50" : ""}`}>Panel médico</button>
@@ -931,7 +1052,16 @@ async function handleUnlinkPatient(patientId) {
             {view === "routines" && <RoutinesPanel />}
             {view === "createRoutine" && <CreateRoutineForm />}
             {view === "exercises" && <ExercisesPanel />}
-            {view === "createExercise" && <CreateExerciseForm />}
+            {view === "createExercise" && (
+  <CreateExercise
+    onSubmit={async (form) => {
+      await handleCreateExercise(form);
+    }}
+    onCancel={() => setView("exercises")}
+    busy={busy}
+    error={error}
+  />
+)}
 
             {error && <div className="mt-6 text-sm text-rose-600">{error}</div>}
           </div>

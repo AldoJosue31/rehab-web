@@ -1,20 +1,22 @@
+// apps/therapist/src/components/Sidebar.jsx
 import React, { useState } from "react";
-import { Link } from "react-router-dom";
 
-/**
- * Sidebar para la app del terapeuta.
- * Auto-contenido, responsive: drawer en mobile, fijo en md+.
- */
-export default function Sidebar() {
+export default function Sidebar({ onNavigate = () => {} }) {
   const [open, setOpen] = useState(false);
 
   const menu = [
-    { key: "home", label: "Panel médico", to: "/dashboard", emoji: "🏥" },
-    { key: "patients", label: "Gestión de pacientes", to: "/patients", emoji: "🧑‍🤝‍🧑" },
-    { key: "routines", label: "Crear rutinas", to: "/routines", emoji: "📋" },
-    { key: "exercises", label: "Ejercicios", to: "/exercises", emoji: "🏃" },
-    { key: "profile", label: "Perfil", to: "/perfil", emoji: "⚙️" },
+    { key: "home", label: "Panel médico", emoji: "🏥" },
+    { key: "patients", label: "Gestión de pacientes", emoji: "🧑‍🤝‍🧑" },
+    { key: "routines", label: "Crear rutinas", emoji: "📋" },
+    { key: "exercises", label: "Ejercicios", emoji: "🏃" },
+    { key: "createExercise", label: "Agregar ejercicio", emoji: "➕" },
+    { key: "profile", label: "Perfil", emoji: "⚙️" },
   ];
+
+  const handleClick = (key) => {
+    setOpen(false);
+    onNavigate(key);
+  };
 
   return (
     <>
@@ -59,15 +61,14 @@ export default function Sidebar() {
 
         <nav className="p-3 space-y-1">
           {menu.map((it) => (
-            <Link
+            <button
               key={it.key}
-              to={it.to}
-              onClick={() => setOpen(false)}
-              className="flex items-center gap-3 p-2 rounded-md hover:bg-[#FFF2EE] transition-colors"
+              onClick={() => handleClick(it.key)}
+              className="w-full text-left flex items-center gap-3 p-2 rounded-md hover:bg-[#FFF2EE] transition-colors"
             >
               <span className="w-8 h-8 rounded-md bg-[#EAA48A]/20 flex items-center justify-center text-lg">{it.emoji}</span>
               <span className="text-sm font-medium">{it.label}</span>
-            </Link>
+            </button>
           ))}
         </nav>
 
