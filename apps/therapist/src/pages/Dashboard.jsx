@@ -1,5 +1,5 @@
 // apps/therapist/src/pages/Dashboard.jsx
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState } from "react";
 import {
   collection,
   addDoc,
@@ -13,22 +13,34 @@ import {
   getDocs,
   orderBy,
   updateDoc,
-  deleteField
+  deleteField,
+  deleteDoc,
 } from "firebase/firestore";
-import { db } from "../firebaseClient"; // ajusta ruta si hace falta
+import { db } from "../firebaseClient";
 import { useAuth } from "../contexts/AuthContext";
-import TopBar from "../components/TopBar"; // si los tienes
-import Sidebar from "../components/Sidebar"; // si los tienes
+import TopBar from "../components/TopBar";
+import Sidebar from "../components/Sidebar";
 import CreateExercise from "../components/CreateExercise";
-// NUEVO: componente para vincular por código (ver archivo a crear)
 import LinkPatientByCode from "../components/LinkPatientByCode";
 
 
-// Si no usas TopBar/Sidebar, puedes reemplazarlos por marcadores simples o eliminarlos.
-
-function SmallBadge({ children }) {
-  return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-indigo-50 text-indigo-700 border border-indigo-100">{children}</span>;
-}
+import PatientsPanel from "../components/PatientsPanel";
+import PatientDetail from "../components/PatientDetail";
+import RoutinesPanel from "../components/RoutinesPanel";
+import CreateRoutineForm from "../components/CreateRoutineForm";
+import ExercisesPanel from "../components/ExercisesPanel";
+import ExerciseDetail from "../components/ExerciseDetail";
+import AddPatientForm from "../components/AddPatientForm";
+import RoutineDetail from "../components/RoutineDetail";
+import TherapistProfile from "../components/TherapistProfile";
+/**
+ * Dashboard — usa los componentes externos para vistas (patients, routines, exercises, etc).
+ * Mantiene la lógica/handlers/listeners del archivo original, pero adaptado al flujo:
+ *  - Ejercicio (plantilla)
+ *  - Rutina (plantilla que referencia ejercicios)
+ *  - Asignación (instancia que copia ejercicios y guarda targets)
+ *  - Sesiones (registro de lo hecho por paciente)
+ */
 
 function SectionHeader({ title, subtitle }) {
   return (
@@ -42,28 +54,31 @@ function SectionHeader({ title, subtitle }) {
 export default function Dashboard() {
   const { user, profile, logout } = useAuth();
 
-  // UI state: "home" | "patients" | "addPatient" | "patientDetail" | "routines" | "createRoutine" | "exercises" | "createExercise"
-  const [view, setView] = useState("home");
-const [selectedExercise, setSelectedExercise] = useState(null);
-  // Patients
+  // vista actual
+  const [view, setView] = useState("home"); // home | patients | patientDetail | routines | createRoutine | exercises | createExercise | exerciseDetail | addPatient
+  // data
   const [patients, setPatients] = useState([]);
   const [patientsLoading, setPatientsLoading] = useState(true);
   const [selectedPatient, setSelectedPatient] = useState(null);
+
+  const [routines, setRoutines] = useState([]);
+  const [exercises, setExercises] = useState([]);
+  const [itemsLoading, setItemsLoading] = useState(true);
+
+  const [selectedExercise, setSelectedExercise] = useState(null);
 
   // UI extras para panel pacientes
   const [showAddForm, setShowAddForm] = useState(false);
   const [showLinkByCode, setShowLinkByCode] = useState(false);
 
-  // Routines & exercises
-  const [routines, setRoutines] = useState([]);
-  const [exercises, setExercises] = useState([]);
-  const [itemsLoading, setItemsLoading] = useState(true);
-
-  // Feedback
+  // feedback
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-// Fetch patients assigned to this therapist
+  // agregar en el state del componente (ya tienes states similares)
+  const [selectedRoutine, setSelectedRoutine] = useState(null);
+
+  // -------------------- Firestore listeners --------------------
 useEffect(() => {
   if (!user?.uid) {
     setPatients([]);
@@ -71,49 +86,74 @@ useEffect(() => {
     return;
   }
 
-   setPatientsLoading(true);
+  setPatientsLoading(true);
   const q = query(collection(db, "patients"), where("created_by_terapeuta", "==", user.uid));
+
   const unsub = onSnapshot(
     q,
-    (snap) => {
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      console.debug("[patients onSnapshot] got", list.length, "docs");
-
-      // preparar lista de uids a consultar (usa paciente_uid si existe, si no usamos el id del doc)
-      const uids = Array.from(new Set(list.map((p) => p.paciente_uid || p.id).filter(Boolean)));
-
-      if (uids.length === 0) {
-        setPatients(list.map(p => ({ ...p, email: "" })));
-        setPatientsLoading(false);
-        return;
-      }
-
-      // obtener users/{uid} en paralelo y mapear emails
-      Promise.all(uids.map((uid) => getDoc(doc(db, "users", uid))))
-        .then((userSnaps) => {
-          const emailMap = {};
-          userSnaps.forEach((s) => {
-            if (s.exists()) {
-              const d = s.data();
-              // intenta varias propiedades por si usas distintas llaves
-              emailMap[s.id] = d.email || d.email_normalized || d.email_normalizado || "";
-            }
-          });
-
-          const enriched = list.map((p) => {
-            const uidToCheck = p.paciente_uid || p.id;
-            return { ...p, email: emailMap[uidToCheck] || "" };
-          });
-
-          setPatients(enriched);
-          setPatientsLoading(false);
-        })
-        .catch((err) => {
-          console.warn("Error fetching user emails for patients:", err);
-          // fallback: guardar la lista sin emails
-          setPatients(list.map(p => ({ ...p, email: "" })));
-          setPatientsLoading(false);
+    async (snap) => {
+      try {
+        // construye lista defensiva (data puede ser undefined temporalmente)
+        const list = snap.docs.map((d) => {
+          const data = d.data() || {};
+          return { id: d.id, ...data };
         });
+
+        // extrae uids de forma segura
+        const uids = Array.from(
+          new Set(
+            list
+              .map((p) => {
+                // paciente_uid podría no existir todavía; fallback a id
+                return (p && (p.paciente_uid || p.usuario_uid || p.id)) || null;
+              })
+              .filter(Boolean)
+          )
+        );
+
+        if (uids.length === 0) {
+          // no hay users que resolver: asigna lista con email vacío y sal
+          setPatients(list.map((p) => ({ ...p, email: "" })));
+          setPatientsLoading(false);
+          return;
+        }
+
+        // fetch de usuarios en paralelo, pero cada getDoc protegido
+        const userDocs = await Promise.all(
+          uids.map(async (uid) => {
+            try {
+              const s = await getDoc(doc(db, "users", uid));
+              return s;
+            } catch (err) {
+              console.warn("getDoc users/ failed for uid:", uid, err);
+              return null;
+            }
+          })
+        );
+
+        // mapa de emails (skip resultados nulos)
+        const emailMap = {};
+        userDocs.forEach((s) => {
+          if (s && s.exists && s.exists()) {
+            const d = s.data() || {};
+            emailMap[s.id] = d.email || d.email_normalized || d.email_normalizado || "";
+          }
+        });
+
+        // enriquece la lista, usando uid fallbacks con defensiva
+        const enriched = list.map((p) => {
+          const uidToCheck = (p && (p.paciente_uid || p.usuario_uid || p.id)) || null;
+          return { ...p, email: (uidToCheck && emailMap[uidToCheck]) || "" };
+        });
+
+        setPatients(enriched);
+        setPatientsLoading(false);
+      } catch (err) {
+        // fallo al procesar snapshot: evitar dejar la UI en blanco, informar y mantener lista previa
+        console.warn("Error procesando patients snapshot:", err);
+        setPatients((prev) => prev || []);
+        setPatientsLoading(false);
+      }
     },
     (err) => {
       console.warn("patients onSnapshot error:", err);
@@ -121,11 +161,10 @@ useEffect(() => {
       setPatientsLoading(false);
     }
   );
+
   return () => unsub();
 }, [user?.uid]);
 
-
-  // Fetch routines & exercises (for create/assign)
   useEffect(() => {
     setItemsLoading(true);
     const unsubR = onSnapshot(
@@ -140,6 +179,7 @@ useEffect(() => {
         setItemsLoading(false);
       }
     );
+
     const unsubE = onSnapshot(
       collection(db, "ejercicios"),
       (snap) => setExercises(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
@@ -148,13 +188,64 @@ useEffect(() => {
         setExercises([]);
       }
     );
+
     return () => {
       unsubR();
       unsubE();
     };
   }, []);
 
-  // ---------- Patients: add ----------
+  // -------------------- Handlers (DB ops) --------------------
+// handler: puede recibir objeto rutina OR id
+async function openRoutineDetail(routineOrId) {
+  setError("");
+  setBusy(true);
+  try {
+    let routine = null;
+
+    if (!routineOrId) throw new Error("Rutina inválida.");
+
+    if (typeof routineOrId === "string") {
+      const snap = await getDoc(doc(db, "routines", routineOrId));
+      if (!snap.exists()) throw new Error("Rutina no encontrada.");
+      routine = { id: snap.id, ...snap.data() };
+    } else {
+      routine = routineOrId;
+    }
+
+    // resolver ejercicios (si vienen como ids o como objetos)
+    const items = routine.ejercicios || [];
+    const resolved = await Promise.all(items.map(async (it) => {
+      const id = (typeof it === "string") ? it : (it.exercise_id || it.id || it.exerciseId || null);
+      if (!id) {
+        // item sin id (obj raw)
+        return { exercise_id: null, nombre: it.nombre || it.name || "Sin ID", raw: it };
+      }
+      try {
+        const esnap = await getDoc(doc(db, "ejercicios", id));
+        if (esnap.exists()) {
+          const d = esnap.data();
+          return { exercise_id: id, nombre: d.nombre || d.name || id, raw: it };
+        } else {
+          return { exercise_id: id, nombre: id, raw: it };
+        }
+      } catch (err) {
+        return { exercise_id: id, nombre: id, raw: it };
+      }
+    }));
+
+    routine.resolved_ejercicios = resolved;
+    setSelectedRoutine(routine);
+    setView("routineDetail");
+  } catch (err) {
+    console.error("openRoutineDetail error:", err);
+    setError(err?.message || "Error cargando detalle de rutina.");
+  } finally {
+    setBusy(false);
+  }
+}
+
+
   async function handleAddPatient(form) {
     setError("");
     setBusy(true);
@@ -168,12 +259,12 @@ useEffect(() => {
         created_at: serverTimestamp(),
       };
       const docRef = await addDoc(collection(db, "patients"), payload);
-      // optional: store relation in therapist's doc or an assignments collection
+      // opcional: set id en doc
+      await setDoc(doc(db, "patients", docRef.id), { id: docRef.id }, { merge: true });
+
       setBusy(false);
       setView("patients");
-      // seleccionar paciente nuevo
       setSelectedPatient({ id: docRef.id, ...payload });
-      // cerrar el formulario si estaba abierto
       setShowAddForm(false);
     } catch (err) {
       console.error("handleAddPatient error:", err);
@@ -182,886 +273,677 @@ useEffect(() => {
     }
   }
 
-  // ---------- Patients: open detail ----------
-async function openPatientDetail(patientId) {
+// reemplaza la función openPatientDetail existente por esta versión
+// reemplaza tu openPatientDetail por esta función
+async function openPatientDetail(patientIdOrUid) {
   setError("");
   setBusy(true);
   try {
-    const snap = await getDoc(doc(db, "patients", patientId));
-    if (!snap.exists()) {
-      setError("Paciente no encontrado.");
+    if (!patientIdOrUid) throw new Error("Paciente inválido.");
+
+    // 1) intentar usar datos ya cargados en memoria (desde el listener `patients`)
+    //    esto evita lecturas adicionales y previene muchos errores de permisos/ids inconsistentes.
+    const localMatch = patients.find(
+      (p) =>
+        p.id === patientIdOrUid ||
+        p.paciente_uid === patientIdOrUid ||
+        p.usuario_uid === patientIdOrUid
+    );
+
+    let baseData = null;
+    let patientDocId = null;
+
+    if (localMatch) {
+      baseData = { ...localMatch };
+      patientDocId = localMatch.id;
+    } else {
+      // 2) si no está en memoria, intentar lectura directa patients/{id} (protegida)
+      try {
+        const snap = await getDoc(doc(db, "patients", patientIdOrUid));
+        if (snap.exists()) {
+          baseData = { id: snap.id, ...snap.data() };
+          patientDocId = snap.id;
+        }
+      } catch (err) {
+        console.debug("direct getDoc patients/{id} failed (will try query fallback):", err?.message);
+      }
+
+      // 3) fallback: buscar por campos paciente_uid / usuario_uid
+      if (!baseData) {
+        try {
+          let snaps = await getDocs(query(collection(db, "patients"), where("paciente_uid", "==", patientIdOrUid)));
+          if (snaps.empty) {
+            snaps = await getDocs(query(collection(db, "patients"), where("usuario_uid", "==", patientIdOrUid)));
+          }
+          if (!snaps.empty) {
+            const pdoc = snaps.docs[0];
+            baseData = { id: pdoc.id, ...pdoc.data() };
+            patientDocId = pdoc.id;
+          }
+        } catch (err) {
+          console.debug("fallback query patients by paciente_uid/usuario_uid failed:", err?.message);
+        }
+      }
+    }
+
+    if (!baseData) {
+      setError("No se encontró el perfil del paciente (o no tienes permisos para verlo).");
       setBusy(false);
       return;
     }
-    const data = { id: snap.id, ...snap.data() };
 
-    // obtener email desde users/{uid} si existe paciente_uid o el id del patient es uid
+    // A partir de aqui intentamos enriquecer con email / sesiones / asignaciones
+    const data = { ...baseData };
+
+    // email desde users/{uid} (no fatal)
     try {
-      const uidToFetch = data.paciente_uid || data.id;
+      const uidToFetch = data.paciente_uid || data.usuario_uid || data.id;
       if (uidToFetch) {
         const userSnap = await getDoc(doc(db, "users", uidToFetch));
-        if (userSnap.exists()) {
-          const ud = userSnap.data();
-          data.email = ud.email || ud.email_normalized || ud.email_normalizado || "";
-        } else {
-          data.email = "";
-        }
-      } else {
-        data.email = "";
-      }
+        data.email = userSnap.exists() ? (userSnap.data().email || "") : "";
+      } else data.email = data.email || "";
     } catch (err) {
       console.warn("Error fetching users/{uid} for patient detail:", err);
-      data.email = "";
+      data.email = data.email || "";
     }
 
-    // load additional info: historial de sesiones, asignaciones, rutinas etc.
-    const sesionesQ = query(collection(db, "sesiones"), where("paciente_id", "==", patientId), orderBy("fecha_completada", "desc"));
-    const sesionesSnap = await getDocs(sesionesQ);
-    const sesiones = sesionesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    // sesiones (intentar, pero si falla por permisos, seguir adelante con array vacío)
+    let sesiones = [];
+    try {
+      if (patientDocId) {
+        const sesionesQ = query(collection(db, "sesiones"), where("paciente_id", "==", patientDocId), orderBy("fecha_completada", "desc"));
+        const sesionesSnap = await getDocs(sesionesQ);
+        sesiones = sesionesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      }
+    } catch (err) {
+      console.warn("No se pudieron cargar sesiones (permiso o error):", err);
+      sesiones = [];
+    }
 
-    const asigQ = query(collection(db, "asignaciones"), where("paciente_id", "==", patientId));
-    const asigSnap = await getDocs(asigQ);
-    const asignaciones = asigSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    // asignaciones (igual: no fatal si falla)
+    let asignaciones = [];
+    try {
+      if (patientDocId) {
+        const asigQ = query(collection(db, "asignaciones"), where("paciente_id", "==", patientDocId));
+        const asigSnap = await getDocs(asigQ);
+        asignaciones = asigSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      }
+    } catch (err) {
+      console.warn("No se pudieron cargar asignaciones (permiso o error):", err);
+      asignaciones = [];
+    }
 
     setSelectedPatient({ ...data, sesiones, asignaciones });
     setView("patientDetail");
+    setBusy(false);
+    return;
   } catch (err) {
     console.error("openPatientDetail error:", err);
-    setError("Error cargando detalle de paciente.");
-  } finally {
+    setError(err?.message || "Error cargando detalle de paciente.");
     setBusy(false);
   }
 }
 
-async function openExerciseDetail(exerciseId) {
+
+
+  async function handleUnlinkPatient(patientId) {
+    setError("");
+    setBusy(true);
+    try {
+      if (!user?.uid) throw new Error("Usuario no autenticado.");
+      const ref = doc(db, "patients", patientId);
+      await updateDoc(ref, {
+        terapeuta_id: deleteField(),
+        created_by_terapeuta: deleteField(),
+        linked_at: deleteField()
+      });
+      if (selectedPatient?.id === patientId) {
+        setSelectedPatient(null);
+        setView("patients");
+      }
+      setBusy(false);
+    } catch (err) {
+      console.error("handleUnlinkPatient error:", err);
+      setError(err?.message || "No se pudo desvincular al paciente. Revisa la consola.");
+      setBusy(false);
+    }
+  }
+
+  async function handleCreateRoutine(form) {
+    setBusy(true);
+    setError("");
+    try {
+      if (!form.nombre || form.nombre.trim().length < 3) {
+        setError("Nombre de rutina inválido.");
+        setBusy(false);
+        return;
+      }
+
+      // transforma ejercicios seleccionados (array de ids) a estructura interna simple
+      const ejercicios = Array.isArray(form.ejercicios)
+        ? form.ejercicios.map((id, idx) => ({ exercise_id: id, order: idx + 1 }))
+        : (form.ejercicios ? [{ exercise_id: form.ejercicios, order: 1 }] : []);
+
+      const payload = {
+        nombre: form.nombre,
+        descripcion: form.descripcion || form.recomendaciones || "",
+        nivel_dificultad: (form.nivel_dificultad || "BAJO").toUpperCase(),
+        ejercicios,
+        sesiones: form.sesiones || null,
+        duracion_minutos: form.duracion || null,
+        owner: user?.uid || null,
+        terapeuta_creador_id: user?.uid || null,
+        created_at: serverTimestamp(),
+      };
+      const docRef = await addDoc(collection(db, "routines"), payload);
+      await setDoc(doc(db, "routines", docRef.id), { id: docRef.id }, { merge: true });
+
+      setBusy(false);
+      setView("routines");
+      return docRef.id;
+    } catch (err) {
+      console.error("handleCreateRoutine error:", err);
+      setError("No se pudo crear la rutina. Revisa consola.");
+      setBusy(false);
+    }
+  }
+
+  async function handleCreateExercise(form) {
+    setBusy(true);
+    setError("");
+    try {
+      if (!form.nombre || form.nombre.trim().length < 2) {
+        setError("Nombre de ejercicio inválido.");
+        setBusy(false);
+        return;
+      }
+      const payload = {
+        nombre: form.nombre,
+        description: form.description || form.descripcion || "",
+        url_video: form.url_video || "",
+        media: form.media || [],
+        // defaults (plantilla)
+        default_repeticiones: form.default_repeticiones ? Number(form.default_repeticiones) : (form.repeticiones ? Number(form.repeticiones) : null),
+        default_series: form.default_series ? Number(form.default_series) : (form.series ? Number(form.series) : null),
+        default_tiempo_segundos: form.default_tiempo_segundos ? Number(form.default_tiempo_segundos) : (form.tiempo_segundos ? Number(form.tiempo_segundos) : null),
+        created_by: user?.uid || null,
+        created_at: serverTimestamp(),
+      };
+      const docRef = await addDoc(collection(db, "ejercicios"), payload);
+      await setDoc(doc(db, "ejercicios", docRef.id), { id: docRef.id }, { merge: true });
+      setBusy(false);
+      setView("exercises");
+      return docRef.id;
+    } catch (err) {
+      console.error("handleCreateExercise error:", err);
+      setError("No se pudo crear el ejercicio.");
+      setBusy(false);
+    }
+  }
+
+  /**
+   * assignRoutineToPatient
+   * - acepta:
+   *    - assignRoutineToPatient({ pacienteId, rutinaId, sesiones, fecha_inicio, exerciseTargets })
+   *    - assignRoutineToPatient(pacienteId) fallback (usa first routine)
+   * - copia los ejercicios de la plantilla dentro de assigned_exercises para mantener plantillas/instancias separadas
+   */
+  async function assignRoutineToPatient(input) {
+    setBusy(true);
+    setError("");
+    try {
+      if (!user?.uid) throw new Error("Usuario no autenticado.");
+
+      // normalize input
+      let pacienteId = null;
+      let rutinaId = null;
+      let sesiones = 1;
+      let fecha_inicio = null;
+      let exerciseTargets = {};
+
+      if (!input) throw new Error("Datos de asignación faltantes.");
+      if (typeof input === "string") {
+        pacienteId = input;
+      } else if (typeof input === "object") {
+        pacienteId = input.pacienteId || input.paciente_id || null;
+        rutinaId = input.rutinaId || input.rutina_id || input.rutinaId || null;
+        sesiones = input.sesiones ?? input.expectedSessions ?? 1;
+        fecha_inicio = input.fecha_inicio || input.fechaInicio || null;
+        exerciseTargets = input.exerciseTargets || {};
+      }
+
+      if (!pacienteId) throw new Error("Paciente inválido.");
+
+      // If rutinaId not provided, pick first routine as fallback
+      if (!rutinaId) {
+        if (!routines || routines.length === 0) throw new Error("No hay rutinas disponibles.");
+        rutinaId = routines[0].id;
+      }
+
+      // fetch rutina
+      const rutSnap = await getDoc(doc(db, "routines", rutinaId));
+      if (!rutSnap.exists()) throw new Error("Rutina no encontrada.");
+      const rutina = { id: rutSnap.id, ...rutSnap.data() };
+
+      // obtener ejercicios referenciados en la plantilla
+      const exerciseIds = (rutina.ejercicios || []).map((e) => e.exercise_id).filter(Boolean);
+      const exerciseDocs = {};
+      if (exerciseIds.length > 0) {
+        const snaps = await Promise.all(exerciseIds.map((id) => getDoc(doc(db, "ejercicios", id))));
+        snaps.forEach((s) => { if (s.exists()) exerciseDocs[s.id] = s.data(); });
+      }
+
+      // construir assigned_exercises (copia de plantilla + targets)
+      const assigned_exercises = (rutina.ejercicios || []).map((item, idx) => {
+        const exId = item.exercise_id;
+        const src = exerciseDocs[exId] || {};
+        const targets = exerciseTargets[exId] || {};
+        return {
+          exercise_id: exId,
+          nombre: src.nombre || "",
+          description: src.description || src.descripcion || "",
+          default_repeticiones: src.default_repeticiones ?? src.repeticiones ?? null,
+          default_series: src.default_series ?? src.series ?? null,
+          default_tiempo_segundos: src.default_tiempo_segundos ?? src.tiempo_segundos ?? null,
+          target_repeticiones: targets.target_repeticiones ?? (src.default_repeticiones ?? null),
+          target_series: targets.target_series ?? (src.default_series ?? null),
+          target_tiempo_segundos: targets.target_tiempo_segundos ?? (src.default_tiempo_segundos ?? null),
+          order: item.order ?? (idx + 1),
+        };
+      });
+
+      const payload = {
+        paciente_id: pacienteId,
+        rutina_id: rutinaId,
+        terapeuta_asignador_id: user.uid,
+        fecha_asignacion: serverTimestamp(),
+        fecha_inicio: fecha_inicio ? fecha_inicio : serverTimestamp(),
+        expectedSessions: Number(sesiones) || 1,
+        progreso: 0,
+        estado: "Asignada",
+        assigned_exercises,
+        created_at: serverTimestamp(),
+      };
+
+      const asignRef = await addDoc(collection(db, "asignaciones"), payload);
+      await setDoc(doc(db, "asignaciones", asignRef.id), { id: asignRef.id }, { merge: true });
+
+      // refrescar detalle del paciente si está abierto
+      if (selectedPatient?.id === pacienteId) {
+        await openPatientDetail(pacienteId);
+      }
+
+      setBusy(false);
+      return asignRef.id;
+    } catch (err) {
+      console.error("assignRoutineToPatient error:", err);
+      setError(err?.message || "No se pudo asignar la rutina.");
+      setBusy(false);
+    }
+  }
+
+  async function openExerciseDetail(exerciseId) {
+    setError("");
+    setBusy(true);
+    try {
+      if (!exerciseId) throw new Error("Id de ejercicio inválido.");
+      const snap = await getDoc(doc(db, "ejercicios", exerciseId));
+      if (!snap.exists()) {
+        setError("Ejercicio no encontrado.");
+        setBusy(false);
+        return;
+      }
+      const data = { id: snap.id, ...snap.data() };
+      data.repeticiones = data.repeticiones ?? data.reps ?? data.default_repeticiones ?? null;
+      data.series = data.series ?? data.default_series ?? null;
+      data.tiempo_segundos = data.tiempo_segundos ?? data.tiempo ?? data.default_tiempo_segundos ?? null;
+      setSelectedExercise(data);
+      setView("exerciseDetail");
+    } catch (err) {
+      console.error("openExerciseDetail error:", err);
+      setError("Error cargando detalle de ejercicio.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function handleDeleteRoutine(routineId) {
+  if (!routineId) return;
+  setBusy(true); setError("");
+  try {
+    await deleteDoc(doc(db, "routines", routineId));
+    // opcional: si vista abierta es esa, volver a lista
+    if (selectedRoutine?.id === routineId) { setSelectedRoutine(null); setView("routines"); }
+  } catch (err) {
+    console.error("delete routine error", err);
+    setError("No se pudo eliminar la rutina.");
+  } finally { setBusy(false); }
+}
+
+// --- guardar cambios de rutina (update) ---
+async function handleSaveRoutine(routineId, updatedFields) {
+  setBusy(true); setError("");
+  try {
+    // normalized payload: ensure tipos correctos
+    const payload = { ...updatedFields, updated_at: serverTimestamp() };
+    await updateDoc(doc(db, "routines", routineId), payload);
+    // refresca detalle si está abierto:
+    if (selectedRoutine?.id === routineId) {
+      await openRoutineDetail(routineId);
+    }
+  } catch (err) {
+    console.error("save routine error", err);
+    setError("No se pudo guardar la rutina.");
+  } finally { setBusy(false); }
+}
+
+// --- eliminar ejercicio ---
+async function handleDeleteExercise(exerciseId) {
+  if (!exerciseId) return;
+  setBusy(true); setError("");
+  try {
+    await deleteDoc(doc(db, "ejercicios", exerciseId));
+    // si tenías ejercicio seleccionar en detalle, cerrar
+    if (selectedExercise?.id === exerciseId) { setSelectedExercise(null); setView("exercises"); }
+  } catch (err) {
+    console.error("delete exercise error", err);
+    setError("No se pudo eliminar el ejercicio.");
+  } finally { setBusy(false); }
+}
+
+// --- editar ejercicio ---
+function handleEditExercise(exObj) {
+  // ejemplo simple: abrir vista createExercise pero pasar initial values
+  // Tendrás que adaptar CreateExercise para aceptar initialValues prop y modo edición
+  setSelectedExercise(exObj);
+  setView("createExercise"); // y en CreateExercise detecta selectedExercise para prellenar y hacer update
+}
+
+async function handleOnLinked(uid) {
   setError("");
   setBusy(true);
   try {
-    if (!exerciseId) throw new Error("Id de ejercicio inválido.");
-    const snap = await getDoc(doc(db, "ejercicios", exerciseId));
-    if (!snap.exists()) {
-      setError("Ejercicio no encontrado.");
+    if (!uid) throw new Error("UID inválido recibido al vincular.");
+
+    // 1) intento directo: si existe patients/{uid} y puedo leerlo, úsalo
+    try {
+      const directSnap = await getDoc(doc(db, "patients", uid));
+      if (directSnap.exists()) {
+        // comprobamos permisos al leer: si existe y lo leíste, adelante
+        setBusy(false);
+        // abrir detalle con el id real (uid)
+        await openPatientDetail(uid);
+        setShowLinkByCode(false);
+        setView("patientDetail");
+        return;
+      }
+    } catch (err) {
+      // no fatal: puede fallar por permisos, seguimos a la búsqueda por campo
+      console.debug("patients direct getDoc failed or not exists, will search by paciente_uid -", err?.message);
+    }
+
+    // 2) buscar por campo paciente_uid o usuario_uid en la colección patients
+    // (esto requiere permiso de lectura sobre pacientes; debería tenerlo el terapeuta)
+    const q = query(
+      collection(db, "patients"),
+      where("paciente_uid", "==", uid)
+    );
+
+    let snaps = await getDocs(q);
+    if (snaps.empty) {
+      // intentar con usuario_uid como fallback
+      const q2 = query(collection(db, "patients"), where("usuario_uid", "==", uid));
+      snaps = await getDocs(q2);
+    }
+
+    if (!snaps.empty) {
+      // tomar el primer doc encontrado (normalmente sólo habrá uno)
+      const pdoc = snaps.docs[0];
+      const patientId = pdoc.id;
+      // abrir detalle con id real
+      await openPatientDetail(patientId);
+      setShowLinkByCode(false);
+      setView("patientDetail");
       setBusy(false);
       return;
     }
-    const data = { id: snap.id, ...snap.data() };
-    // normalizar campos opcionales
-    data.repeticiones = data.repeticiones ?? data.reps ?? null;
-    data.series = data.series ?? null;
-    data.tiempo_segundos = data.tiempo_segundos ?? data.tiempo ?? null;
-    setSelectedExercise(data);
-    setView("exerciseDetail");
-  } catch (err) {
-    console.error("openExerciseDetail error:", err);
-    setError("Error cargando detalle de ejercicio.");
-  } finally {
-    setBusy(false);
-  }
-}
 
-
-  // ---------- Create routine ----------
-async function handleCreateRoutine(form) {
-  setBusy(true);
-  setError("");
-  try {
-    // Validaciones mínimas
-    if (!form.nombre || form.nombre.trim().length < 3) {
-      setError("Nombre de rutina inválido.");
-      setBusy(false);
-      return;
-    }
-
-    // construye el payload consistente con tu ejemplo
-    const payload = {
-      nombre: form.nombre,
-      descripcion: form.descripcion || "",
-      nivel_dificultad: (form.nivel_dificultad || "BAJO").toUpperCase(),
-      ejercicios: Array.isArray(form.ejercicios) ? form.ejercicios : (form.ejercicios ? [form.ejercicios] : []), // array de ids
-      owner: user?.uid || null,
-      terapeuta_creador_id: user?.uid || null,
-      created_at: serverTimestamp(),
-    };
-
-    // crear doc con id auto
-    const docRef = await addDoc(collection(db, "routines"), payload);
-
-    // guardar campo id dentro del documento por conveniencia (opcional pero útil)
-    await setDoc(doc(db, "routines", docRef.id), { id: docRef.id }, { merge: true });
-
-    // registra auditoría básica
-    try {
-      await addDoc(collection(db, "auditoria"), {
-        accion: "RutinaCreada",
-        entidad_afectada: "routines",
-        entidad_id: docRef.id,
-        usuario_id: user?.uid || null,
-        datos_nuevos: payload,
-        datos_previos: null,
-        timestamp: serverTimestamp(),
-      });
-    } catch (auditErr) {
-      console.warn("Auditoría falla (se ignora):", auditErr);
-    }
-
-    setBusy(false);
-    setView("routines");
-    // opcional: refrescar lista o navegar a detalle
-    return docRef.id;
-  } catch (err) {
-    console.error("handleCreateRoutine error:", err);
-    setError("No se pudo crear la rutina. Revisa consola.");
-    setBusy(false);
-  }
-}
-
-
-  // ---------- Create exercise ----------
-async function handleCreateExercise(form) {
-  setBusy(true);
-  setError("");
-  try {
-    if (!form.nombre || form.nombre.trim().length < 2) {
-      setError("Nombre de ejercicio inválido.");
-      setBusy(false);
-      return;
-    }
-
-    // normalizar a tipos numéricos cuando tenga sentido
-    const payload = {
-      nombre: form.nombre,
-      description: form.description || form.descripcion || "",
-      repeticiones: form.repeticiones ? Number(form.repeticiones) : null,
-      series: form.series ? Number(form.series) : null,
-      tiempo_segundos: form.tiempo_segundos ? Number(form.tiempo_segundos) : null,
-      url_video: form.url_video || "",
-      created_by: user?.uid || null,
-      created_at: serverTimestamp(),
-    };
-
-    const docRef = await addDoc(collection(db, "ejercicios"), payload);
-    // establecer id en documento
-    await setDoc(doc(db, "ejercicios", docRef.id), { id: docRef.id }, { merge: true });
-
-    // auditoría
-    try {
-      await addDoc(collection(db, "auditoria"), {
-        accion: "EjercicioCreado",
-        entidad_afectada: "ejercicios",
-        entidad_id: docRef.id,
-        usuario_id: user?.uid || null,
-        datos_nuevos: payload,
-        datos_previos: null,
-        timestamp: serverTimestamp(),
-      });
-    } catch (_) {}
-
-    setBusy(false);
-    setView("exercises");
-    return docRef.id;
-  } catch (err) {
-    console.error("handleCreateExercise error:", err);
-    setError("No se pudo crear el ejercicio.");
-    setBusy(false);
-  }
-}
-
-
-  // ---------- Assign routine to patient (helper) ----------
-async function assignRoutineToPatient({ pacienteId, rutinaId, sesiones = 1 }) {
-  setBusy(true);
-  setError("");
-  try {
-    if (!user?.uid) throw new Error("Usuario no autenticado.");
-    if (!pacienteId || !rutinaId) throw new Error("Paciente o rutina inválida.");
-
-    // asegúrate de convertir sesiones a número
-    const expected = Number(sesiones) || 1;
-
-    const payload = {
-      paciente_id: pacienteId,
-      rutina_id: rutinaId,
-      terapeuta_asignador_id: user.uid,
-      fecha_asignacion: serverTimestamp(),
-      expectedSessions: expected,
-      progreso: 0,
-      estado: "Asignada", // o "En progreso" dependiendo flujo
-    };
-
-    const asignRef = await addDoc(collection(db, "asignaciones"), payload);
-
-    // auditoría
-    try {
-      await addDoc(collection(db, "auditoria"), {
-        accion: "AsignacionCreada",
-        entidad_afectada: "asignaciones",
-        entidad_id: asignRef.id,
-        usuario_id: user.uid,
-        datos_nuevos: payload,
-        datos_previos: null,
-        timestamp: serverTimestamp(),
-      });
-    } catch (auditErr) {
-      console.warn("Auditoría fallo (ignorado):", auditErr);
-    }
-
-    // refrescar detalle paciente si está abierto
-    if (selectedPatient?.id === pacienteId) {
-      await openPatientDetail(pacienteId);
-    }
-
-    setBusy(false);
-    return asignRef.id;
-  } catch (err) {
-    console.error("assignRoutineToPatient error:", err);
-    setError(err?.message || "No se pudo asignar la rutina.");
-    setBusy(false);
-  }
-}
-
-
-  // Simple "progress chart" component (weeks)
-  function ProgressChart({ sesiones = [] }) {
-    // Build weekly buckets (demo): sesiones have fecha_completada timestamp & duracion_minutos
-    // For demo, map last 6 weeks with random/derived values if sesiones empty
-    const weeks = [];
-
-    for (let i = 5; i >= 0; i--) {
-      const label = `S-${i + 1}`;
-      const value = Math.min(100, Math.round(Math.random() * 60 + i * 6)); // demo placeholder
-      weeks.push({ label, value });
-    }
-
-    // If sesiones provided, we could compute real values (omitted for brevity)
-    return (
-      <div className="w-full overflow-x-auto">
-        <div className="flex items-end gap-3 h-36">
-          {weeks.map((w) => (
-            <div key={w.label} className="flex-1 text-center">
-              <div className="h-full flex items-end justify-center">
-                <div className="rounded-t-md bg-indigo-600" style={{ height: `${w.value}%`, minHeight: 6 }} title={`${w.value}%`}></div>
-              </div>
-              <div className="text-xs mt-2 text-gray-600">{w.label}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- UI pieces ----------
-  function HomePanel() {
-    return (
-      <div className="space-y-6">
-        <SectionHeader title={`Hola ${profile?.nombre_completo?.split(" ")[0] || user?.email?.split("@")[0] || "Terapeuta"}`} subtitle="Panel médico — Bienvenido" />
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="col-span-2 bg-white rounded-xl p-4 shadow-sm border">
-            <h4 className="font-semibold mb-2">Acciones rápidas</h4>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <button onClick={() => setView("patients")} className="p-3 bg-indigo-50 border border-indigo-100 rounded-lg text-left">
-                <div className="font-medium">Añadir paciente</div>
-                <div className="text-xs text-gray-500 mt-1">Crear perfil y vincular</div>
-              </button>
-              <button onClick={() => setView("createRoutine")} className="p-3 bg-emerald-50 border border-emerald-100 rounded-lg text-left">
-                <div className="font-medium">Crear rutina</div>
-                <div className="text-xs text-gray-500 mt-1">Diseñar y guardar</div>
-              </button>
-              <button onClick={() => setView("createExercise")} className="p-3 bg-yellow-50 border border-yellow-100 rounded-lg text-left">
-                <div className="font-medium">Agregar ejercicio</div>
-                <div className="text-xs text-gray-500 mt-1">Nuevo ejercicio multimedia</div>
-              </button>
-            </div>
-
-            <div className="mt-6">
-              <h5 className="font-medium mb-2">Resumen rápido</h5>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="p-3 bg-white border rounded-lg">
-                  <div className="text-xs text-gray-500">Pacientes</div>
-                  <div className="text-xl font-semibold mt-1">{patients.length}</div>
-                </div>
-                <div className="p-3 bg-white border rounded-lg">
-                  <div className="text-xs text-gray-500">Rutinas</div>
-                  <div className="text-xl font-semibold mt-1">{routines.length}</div>
-                </div>
-                <div className="p-3 bg-white border rounded-lg">
-                  <div className="text-xs text-gray-500">Ejercicios</div>
-                  <div className="text-xl font-semibold mt-1">{exercises.length}</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <aside className="bg-white rounded-xl p-4 shadow-sm border">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-xs text-gray-500">Usuario</div>
-                <div className="font-medium">{profile?.nombre_completo || user?.email}</div>
-                <div className="text-xs mt-1 text-gray-400">UID: <span className="font-mono text-xs">{user?.uid}</span></div>
-              </div>
-              <div className="flex flex-col items-end gap-2">
-                <button onClick={() => { logout(); }} className="px-3 py-1 bg-rose-500 text-white rounded text-sm">Cerrar sesión</button>
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <div className="text-xs text-gray-500">Progreso promedio (demo)</div>
-              <div className="mt-2">
-                <div className="w-full h-3 bg-gray-100 rounded-full">
-                  <div className="h-3 rounded-full bg-indigo-600" style={{ width: `${profile?.dailyProgress ?? 48}%` }} />
-                </div>
-                <div className="text-xs text-gray-500 mt-1">{profile?.dailyProgress ?? 48}%</div>
-              </div>
-            </div>
-          </aside>
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- Patients list UI (MODIFICADO) ----------
-  function PatientsPanel() {
-    return (
-      <div>
-        <SectionHeader title="Gestión de pacientes" subtitle="Añade, visualiza y administra pacientes" />
-        <div className="mb-4 flex gap-2 items-center">
-          {/* Botones: Añadir paciente (manual) / Vincular por código */}
-          <button
-            onClick={() => { setShowAddForm((s) => !s); setShowLinkByCode(false); }}
-            className={`px-4 py-2 rounded ${showAddForm ? "bg-indigo-600 text-white" : "border"}`}
-          >
-            Añadir paciente
-          </button>
-
-          <button
-            onClick={() => { setShowLinkByCode((s) => !s); setShowAddForm(false); }}
-            className={`px-4 py-2 rounded ${showLinkByCode ? "bg-emerald-600 text-white" : "border"}`}
-          >
-            Vincular paciente (por código)
-          </button>
-
-          <button onClick={() => setView("home")} className="px-4 py-2 border rounded ml-auto">Volver al panel</button>
-        </div>
-
-        {/* Si el terapeuta abrió el formulario manual */}
-        {showAddForm && (
-          <div className="mb-4">
-            {/* Reutilizamos la función AddPatientForm definida más abajo (componente local) */}
-            <AddPatientForm />
-          </div>
-        )}
-
-        {/* Si el terapeuta abrió el panel para vincular por código */}
-        {showLinkByCode && (
-          <div className="mb-4">
-            <LinkPatientByCode therapistId={user?.uid} onLinked={(uid) => {
-              // abrir detalle del paciente vinculado y cerrar panel
-              openPatientDetail(uid);
-              setShowLinkByCode(false);
-            }} />
-          </div>
-        )}
-
-        <div className="bg-white rounded-xl p-4 shadow-sm border">
-          {patientsLoading ? (
-            <p className="text-sm text-gray-500">Cargando pacientes...</p>
-          ) : patients.length === 0 ? (
-            <p className="text-sm text-gray-500">No hay pacientes aún.</p>
-          ) : (
-            <div className="space-y-3">
-{patients.map((p) => (
-  <div key={p.id} className="p-3 border rounded flex items-center justify-between">
-    <div>
-      <div className="font-medium">{p.nombre_completo}</div>
-      <div className="text-xs text-gray-500">{p.email ? p.email : (p.telefono_emergencia || "Sin teléfono")}</div>
-      <div className="text-xs text-gray-400 mt-1">Tutor: {p.nombre_tutor || "—"}</div>
-    </div>
-
-    <div className="flex items-center gap-2">
-      <button
-        onClick={() => openPatientDetail(p.id)}
-        className="px-3 py-1 bg-indigo-50 border rounded text-sm"
-      >
-        Ver
-      </button>
-
-<button
-  onClick={() => {
-    if (!routines || routines.length === 0) return alert("No hay rutinas disponibles.");
-    // crear lista corta para elegir
-    const list = routines.map((r, i) => `${i+1}. ${r.nombre} (id:${r.id})`).join("\n");
-    const choice = window.prompt(`Elige rutina (escribe el número):\n${list}\n\nO escribe el id de la rutina:`);
-    if (!choice) return;
-    let rutinaId = null;
-    const n = Number(choice);
-    if (!Number.isNaN(n) && n >= 1 && n <= routines.length) rutinaId = routines[n-1].id;
-    else rutinaId = choice.trim();
-    if (!rutinaId) return alert("Rutina inválida.");
-    const sessions = window.prompt("¿Cuántas sesiones esperadas? (número)", "5");
-    if (!sessions) return;
-    assignRoutineToPatient({ pacienteId: p.id, rutinaId, sesiones: Number(sessions) });
-  }}
-  className="px-3 py-1 bg-emerald-50 border rounded text-sm"
->
-  Asignar rutina
-</button>
-
-
-<button
-  onClick={() => {
-    const ok = window.confirm(`¿Desvincular al paciente "${p.nombre_completo}"? Esta acción quitará la relación con el terapeuta.`);
-    if (ok) handleUnlinkPatient(p.id);
-  }}
-  disabled={busy}
-  className={`px-3 py-1 border rounded text-sm ${busy ? "opacity-50 cursor-not-allowed" : "bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100"}`}
->
-  Desvincular
-</button>
-    </div>
-  </div>
-))}
-
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- Unlink / Desvincular paciente ----------
-async function handleUnlinkPatient(patientId) {
-  console.debug("[handleUnlinkPatient] start", { patientId, therapistId: user?.uid });
-  setError("");
-  setBusy(true);
-  try {
-    if (!user?.uid) throw new Error("Usuario no autenticado.");
-
-    const ref = doc(db, "patients", patientId);
-
-    // elimina campos de vinculación (ajusta nombres si usas otros campos)
-    await updateDoc(ref, {
-      terapeuta_id: deleteField(),
-      created_by_terapeuta: deleteField(),
-      linked_at: deleteField()
-    });
-
-    console.debug("[handleUnlinkPatient] success", { patientId });
-    // si el detalle del paciente estaba abierto, ciérralo
-    if (selectedPatient?.id === patientId) {
-      setSelectedPatient(null);
-      setView("patients");
-    }
-
+    // 3) si no encontramos nada, informar al usuario y recargar la lista (porque la vinculación pudo haber creado los campos en otro momento)
+    setError("Paciente vinculado correctamente pero no se encontró su perfil local (patients). Espera unos segundos y vuelve a intentarlo o refresca la vista.");
+    // opcional: fuerza recarga del listener de patients re-suscribiendo (simple: togglear el estado patientsLoading para forzar UI)
+    setPatientsLoading(true);
+    // dejamos el busy en false para que UI reaccione
     setBusy(false);
   } catch (err) {
-    console.error("handleUnlinkPatient error:", err);
-    setError(err?.message || "No se pudo desvincular al paciente. Revisa la consola.");
+    console.error("handleOnLinked error:", err);
+    setError(err?.message || "Error procesando enlace de paciente.");
     setBusy(false);
   }
 }
 
-
-
-  // ---------- AddPatient form (local) ----------
-  function AddPatientForm() {
-    const [nombre, setNombre] = useState("");
-    const [telefono, setTelefono] = useState("");
-    const [tutor, setTutor] = useState("");
-    const [nivel, setNivel] = useState("Moderado");
-
-    return (
-      <div>
-        <SectionHeader title="Añadir paciente" subtitle="Rellena datos y guarda para vincular al paciente" />
-        <div className="bg-white rounded-xl p-6 shadow-sm border max-w-2xl">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleAddPatient({ nombre, telefono, tutor, nivel });
-            }}
-            className="space-y-4"
-          >
-            <div>
-              <label className="block text-sm text-gray-600">Nombre completo</label>
-              <input required value={nombre} onChange={(e) => setNombre(e.target.value)} className="w-full border rounded px-4 py-2" placeholder="Ej. Juan Pérez" />
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm text-gray-600">Teléfono de emergencia</label>
-                <input value={telefono} onChange={(e) => setTelefono(e.target.value)} className="w-full border rounded px-4 py-2" placeholder="55 5555 5555" />
-              </div>
-              <div>
-                <label className="block text-sm text-gray-600">Nombre del tutor</label>
-                <input value={tutor} onChange={(e) => setTutor(e.target.value)} className="w-full border rounded px-4 py-2" placeholder="Nombre del encargado" />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm text-gray-600">Nivel de movilidad</label>
-              <select value={nivel} onChange={(e) => setNivel(e.target.value)} className="w-full border rounded px-4 py-2">
-                <option>Alto</option>
-                <option>Moderado</option>
-                <option>Bajo</option>
-                <option>Sin movilidad</option>
-              </select>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <button type="submit" disabled={busy} className="px-4 py-2 bg-indigo-600 text-white rounded">{busy ? "Guardando..." : "Guardar paciente"}</button>
-              <button type="button" onClick={() => { setView("patients"); setShowAddForm(false); }} className="px-4 py-2 border rounded">Cancelar</button>
-            </div>
-
-            {error && <p className="text-sm text-rose-600 mt-2">{error}</p>}
-          </form>
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- Patient detail ----------
-  function PatientDetail() {
-    if (!selectedPatient) return <p>Selecciona un paciente</p>;
-
-    const p = selectedPatient;
-    return (
-      <div>
-        <div className="flex items-start justify-between">
-          <div>
-            <h2 className="text-2xl font-semibold">{p.nombre_completo}</h2>
-            <div className="text-sm text-gray-500">Email: {p.email || "—"}</div>
-            <div className="text-sm text-gray-500">Teléfono: {p.telefono_emergencia || "—"}</div>
-            <div className="text-sm text-gray-500">Tutor: {p.nombre_tutor || "—"}</div>
-          </div>
-          <div className="flex gap-2">
-            <button onClick={() => setView("patients")} className="px-3 py-1 border rounded">Volver</button>
-            <button onClick={() => assignRoutineToPatient({ pacienteId: p.id, rutinaId: routines[0]?.id })} className="px-3 py-1 bg-emerald-600 text-white rounded">Asignar rutina</button>
-          </div>
-        </div>
-
-        <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="col-span-2 bg-white rounded-xl p-4 shadow-sm border">
-            <h4 className="font-medium mb-2">Detalles personales</h4>
-            <div className="text-sm text-gray-600 mb-2">Edad: {p.edad || "—"} • Discapacidad: {p.discapacidad || "—"}</div>
-
-            <h5 className="font-medium mt-4 mb-2">Rutinas asignadas</h5>
-            {p.asignaciones && p.asignaciones.length ? (
-              p.asignaciones.map((a) => (
-                <div key={a.id} className="p-3 border rounded mb-3 flex items-center justify-between">
-                  <div>
-                    <div className="font-medium">Rutina: {a.rutina_id || "—"}</div>
-                    <div className="text-xs text-gray-500">Estado: {a.estado}</div>
-                  </div>
-                  <div className="text-sm text-gray-500">{a.progreso ?? 0}%</div>
-                </div>
-              ))
-            ) : (
-              <p className="text-sm text-gray-500">No hay rutinas asignadas.</p>
-            )}
-
-            <h5 className="font-medium mt-4 mb-2">Historial de sesiones</h5>
-            {p.sesiones && p.sesiones.length ? (
-              <div className="space-y-3">
-                <div className="text-sm text-gray-500">Semanas trabajadas (resumen)</div>
-                <ProgressChart sesiones={p.sesiones} />
-                <div className="mt-3">
-                  {p.sesiones.slice(0, 6).map((s) => (
-                    <div key={s.id} className="p-2 border rounded mb-2 text-sm">
-                      <div className="font-medium">{s.fecha_completada?.toDate ? s.fecha_completada.toDate().toLocaleString() : s.fecha_completada}</div>
-                      <div className="text-xs text-gray-500">Duración: {s.duracion_minutos || "—"} min • Percepción: {s.percepcion_esfuerzo || "—"}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <p className="text-sm text-gray-500">Aún no hay sesiones registradas.</p>
-            )}
-          </div>
-
-          <aside className="bg-white rounded-xl p-4 shadow-sm border">
-            <h5 className="font-medium mb-2">Acciones</h5>
-            <div className="flex flex-col gap-2">
-              <button onClick={() => setView("createRoutine")} className="px-3 py-2 bg-indigo-50 border rounded text-left">Crear rutina</button>
-              <button onClick={() => setView("createExercise")} className="px-3 py-2 bg-yellow-50 border rounded text-left">Agregar ejercicio</button>
-            </div>
-          </aside>
-        </div>
-      </div>
-    );
-  }
-
-  function ExerciseDetail() {
-  if (!selectedExercise) return <p>Selecciona un ejercicio</p>;
-  const e = selectedExercise;
-
-  const formatDate = (ts) => {
-    try {
-      return ts?.toDate ? ts.toDate().toLocaleString() : (ts ? String(ts) : "—");
-    } catch {
-      return "—";
-    }
-  };
-
-  return (
-    <div>
-      <div className="flex items-start justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold">{e.nombre}</h2>
-          <div className="text-sm text-gray-500 mt-1">ID: <span className="font-mono text-xs">{e.id}</span></div>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={() => setView("exercises")} className="px-3 py-1 border rounded">Volver</button>
-          {/* Si quieres editar más adelante, puedes añadir botón Editar aquí */}
-        </div>
-      </div>
-
-      <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="col-span-2 bg-white rounded-xl p-4 shadow-sm border">
-          <h4 className="font-medium mb-2">Descripción</h4>
-          <div className="text-sm text-gray-700 mb-4">{e.description || e.descripcion || "—"}</div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <div className="text-xs text-gray-500">Repeticiones</div>
-              <div className="font-medium">{e.repeticiones ?? "—"}</div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500">Series</div>
-              <div className="font-medium">{e.series ?? "—"}</div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500">Tiempo (s)</div>
-              <div className="font-medium">{e.tiempo_segundos ?? "—"}</div>
-            </div>
-          </div>
-
-          <div className="mt-4">
-            <div className="text-xs text-gray-500">Video / Media</div>
-            <div className="mt-2 space-y-1">
-              {(e.url_video ? [e.url_video] : []).concat(e.media || []).filter(Boolean).map((u, i) => (
-                <a key={i} href={u} target="_blank" rel="noreferrer" className="block text-sm text-indigo-600 underline">{u}</a>
-              ))}
-              {/* si no hay media mostramos mensaje */}
-              {(!((e.media || []).length || e.url_video)) && <div className="text-sm text-gray-500">No hay media disponible.</div>}
-            </div>
-          </div>
-
-          <div className="mt-6 text-xs text-gray-500">
-            <div>Creado por: {e.created_by || "—"}</div>
-            <div>Creado: {formatDate(e.created_at)}</div>
-          </div>
-        </div>
-
-        <aside className="bg-white rounded-xl p-4 shadow-sm border">
-          <h5 className="font-medium mb-2">Acciones</h5>
-          <div className="flex flex-col gap-2">
-            <button onClick={() => { /* más acciones: copiar id, editar, eliminar */ }} className="px-3 py-2 border rounded text-left">Copiar ID</button>
-            <button onClick={() => setView("createExercise")} className="px-3 py-2 bg-yellow-50 border rounded text-left">Agregar nuevo</button>
-          </div>
-        </aside>
-      </div>
-    </div>
-  );
-}
-
-
-  // ---------- Routines panel ----------
-  function RoutinesPanel() {
-    return (
-      <div>
-        <SectionHeader title="Creación y gestión de rutinas" subtitle="Diseña rutinas y asígnalas a pacientes" />
-        <div className="mb-4 flex gap-2">
-          <button onClick={() => setView("createRoutine")} className="px-4 py-2 bg-indigo-600 text-white rounded">Crear rutina</button>
-          <button onClick={() => setView("home")} className="px-4 py-2 border rounded">Volver al panel</button>
-        </div>
-
-        <div className="bg-white rounded-xl p-4 shadow-sm border">
-          {itemsLoading ? (
-            <p className="text-sm text-gray-500">Cargando rutinas...</p>
-          ) : routines.length === 0 ? (
-            <p className="text-sm text-gray-500">No hay rutinas guardadas.</p>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {routines.map((r) => (
-                <div key={r.id} className="p-3 border rounded">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <div className="font-medium">{r.nombre}</div>
-                      <div className="text-xs text-gray-500 mt-1">Sesiones: {r.sesiones || "—"} • Duración: {r.duracion_minutos || "—"} min</div>
-                      <div className="text-xs text-gray-400 mt-2">{r.recomendaciones || ""}</div>
-                    </div>
-                    <div className="text-sm text-gray-500"> {r.ejercicios_ids?.length || 0} ejercicios</div>
-                  </div>
-                  <div className="mt-3 flex gap-2">
-                    <button onClick={() => console.log("Asignar a paciente...")} className="px-3 py-1 bg-emerald-50 border rounded text-sm">Asignar</button>
-                    <button onClick={() => console.log("Editar...")} className="px-3 py-1 border rounded text-sm">Editar</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- CreateRoutine form ----------
-  function CreateRoutineForm() {
-    const [nombre, setNombre] = useState("");
-    const [sesionesN, setSesionesN] = useState(4);
-    const [duracion, setDuracion] = useState(20);
-    const [recomendaciones, setRecomendaciones] = useState("");
-    const [selectedEj, setSelectedEj] = useState([]);
-
-    const toggleEj = (id) => {
-      setSelectedEj((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
-    };
-
-    return (
-      <div>
-        <SectionHeader title="Crear rutina" subtitle="Añade ejercicios, define sesiones y recomendaciones" />
-        <div className="bg-white rounded-xl p-6 shadow-sm border max-w-3xl">
-          <form onSubmit={(e) => { e.preventDefault(); handleCreateRoutine({ nombre, sesiones: sesionesN, duracion, recomendaciones, ejercicios: selectedEj }); }} className="space-y-4">
-            <div>
-              <label className="block text-sm text-gray-600">Nombre de la rutina</label>
-              <input required value={nombre} onChange={(e) => setNombre(e.target.value)} className="w-full border rounded px-4 py-2" placeholder="Ej. Rehabilitación de hombro" />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm text-gray-600">Sesiones</label>
-                <input type="number" min="1" value={sesionesN} onChange={(e) => setSesionesN(e.target.value)} className="w-full border rounded px-4 py-2" />
-              </div>
-              <div>
-                <label className="block text-sm text-gray-600">Duración (min)</label>
-                <input type="number" min="1" value={duracion} onChange={(e) => setDuracion(e.target.value)} className="w-full border rounded px-4 py-2" />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm text-gray-600">Recomendaciones</label>
-              <textarea value={recomendaciones} onChange={(e) => setRecomendaciones(e.target.value)} className="w-full border rounded px-4 py-2" rows={3} />
-            </div>
-
-            <div>
-              <label className="block text-sm text-gray-600 mb-2">Añadir ejercicios disponibles</label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-44 overflow-auto">
-                {exercises.length === 0 ? (
-                  <div className="text-sm text-gray-500">No hay ejercicios disponibles.</div>
-                ) : (
-                  exercises.map((ex) => (
-                    <label key={ex.id} className="p-2 border rounded flex items-center gap-2">
-                      <input type="checkbox" checked={selectedEj.includes(ex.id)} onChange={() => toggleEj(ex.id)} />
-                      <div className="text-sm">
-                        <div className="font-medium">{ex.nombre}</div>
-                        <div className="text-xs text-gray-500">{ex.descripcion || ""}</div>
-                      </div>
-                    </label>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <button type="submit" disabled={busy} className="px-4 py-2 bg-indigo-600 text-white rounded">{busy ? "Creando..." : "Crear rutina"}</button>
-              <button type="button" onClick={() => setView("routines")} className="px-4 py-2 border rounded">Cancelar</button>
-            </div>
-
-            {error && <p className="text-sm text-rose-600 mt-2">{error}</p>}
-          </form>
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- Exercises panel & create ----------
-  function ExercisesPanel() {
-    return (
-      <div>
-        <SectionHeader title="Ejercicios" subtitle="Crea y administra ejercicios disponibles" />
-        <div className="mb-4 flex gap-2">
-          <button onClick={() => setView("createExercise")} className="px-4 py-2 bg-yellow-600 text-white rounded">Agregar ejercicio</button>
-          <button onClick={() => setView("home")} className="px-4 py-2 border rounded">Volver al panel</button>
-        </div>
-
-        <div className="bg-white rounded-xl p-4 shadow-sm border">
-          {exercises.length === 0 ? (
-            <p className="text-sm text-gray-500">No hay ejercicios.</p>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-{exercises.map((ex) => (
-  <div key={ex.id} className="p-3 border rounded">
-    <div className="font-medium">{ex.nombre}</div>
-    <div className="text-xs text-gray-500 mt-1">{ex.description || ex.descripcion || ""}</div>
-    <div className="text-xs text-gray-500 mt-1">
-      {ex.repeticiones ? `Reps: ${ex.repeticiones}` : ""} {ex.series ? ` • Series: ${ex.series}` : ""} {ex.tiempo_segundos ? ` • Tiempo: ${ex.tiempo_segundos}s` : ""}
-    </div>
-    <div className="flex gap-2 mt-2">
-      {(ex.media || ex.urls || []).slice(0, 2).map((m, i) => (
-        <a key={i} href={m} target="_blank" rel="noreferrer" className="text-xs text-indigo-600 underline">Media {i + 1}</a>
-      ))}
-      <button
-        onClick={() => openExerciseDetail(ex.id)}
-        className="px-3 py-1 border rounded text-sm bg-indigo-50"
-      >
-        Detalle
-      </button>
-    </div>
-  </div>
-))}
-
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- Main render ----------
+  // -------------------- Main layout & view routing (same UI as tu versión) --------------------
   return (
     <div className="min-h-screen bg-[#FFF8F3]">
-      {/* Top bar (if tienes componente) */}
       <TopBar user={{ ...user, ...profile }} />
 
       <div className="flex flex-col md:flex-row">
-        {Sidebar ? (
-  <div className="w-full md:w-64">
-    <Sidebar onNavigate={(key) => {
-      // Si quieres mapear keys a vistas diferentes, hazlo aquí
-      // usamos key tal cual porque coincide con tus vistas
-      setView(key);
-    }} />
-  </div>
-) : (
-          <nav className="w-full md:w-56 bg-white p-4 border-r">
-            <div className="space-y-2">
-              <button onClick={() => setView("home")} className={`w-full text-left px-3 py-2 rounded ${view === "home" ? "bg-indigo-50" : ""}`}>Panel médico</button>
-              <button onClick={() => setView("patients")} className={`w-full text-left px-3 py-2 rounded ${view === "patients" ? "bg-indigo-50" : ""}`}>Gestión de pacientes</button>
-              <button onClick={() => setView("routines")} className={`w-full text-left px-3 py-2 rounded ${view === "routines" ? "bg-indigo-50" : ""}`}>Crear rutinas</button>
-              <button onClick={() => setView("exercises")} className={`w-full text-left px-3 py-2 rounded ${view === "exercises" ? "bg-indigo-50" : ""}`}>Crear ejercicios</button>
-            </div>
-          </nav>
-        )}
+        <div className="w-full md:w-64">
+          <Sidebar onNavigate={(key) => setView(key)} />
+        </div>
 
         <main className="flex-1 p-4 md:p-8">
           <div className="max-w-7xl mx-auto">
-            {/* Render views */}
-            {view === "home" && <HomePanel />}
-            {view === "patients" && <PatientsPanel />}
-            {view === "addPatient" && <AddPatientForm />}
-            {view === "patientDetail" && <PatientDetail />}
-            {view === "routines" && <RoutinesPanel />}
-            {view === "createRoutine" && <CreateRoutineForm />}
-            {view === "exercises" && <ExercisesPanel />}
-            {view === "createExercise" && (
-  <CreateExercise
-    onSubmit={async (form) => {
-      await handleCreateExercise(form);
+            {/* Home simple header reused */}
+            {view === "home" && (
+              <div className="space-y-6">
+                <SectionHeader title={`Hola ${profile?.nombre_completo?.split(" ")[0] || user?.email?.split("@")[0] || "Terapeuta"}`} subtitle="Panel médico — Bienvenido" />
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="col-span-2 bg-white rounded-xl p-4 shadow-sm border">
+                    <h4 className="font-semibold mb-2">Acciones rápidas</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <button onClick={() => setView("patients")} className="p-3 bg-indigo-50 border border-indigo-100 rounded-lg text-left">
+                        <div className="font-medium">Añadir paciente</div>
+                        <div className="text-xs text-gray-500 mt-1">Crear perfil y vincular</div>
+                      </button>
+                      <button onClick={() => setView("createRoutine")} className="p-3 bg-emerald-50 border border-emerald-100 rounded-lg text-left">
+                        <div className="font-medium">Crear rutina</div>
+                        <div className="text-xs text-gray-500 mt-1">Diseñar y guardar</div>
+                      </button>
+                      <button onClick={() => setView("createExercise")} className="p-3 bg-yellow-50 border border-yellow-100 rounded-lg text-left">
+                        <div className="font-medium">Agregar ejercicio</div>
+                        <div className="text-xs text-gray-500 mt-1">Nuevo ejercicio multimedia</div>
+                      </button>
+                    </div>
+
+                    <div className="mt-6">
+                      <h5 className="font-medium mb-2">Resumen rápido</h5>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className="p-3 bg-white border rounded-lg">
+                          <div className="text-xs text-gray-500">Pacientes</div>
+                          <div className="text-xl font-semibold mt-1">{patients.length}</div>
+                        </div>
+                        <div className="p-3 bg-white border rounded-lg">
+                          <div className="text-xs text-gray-500">Rutinas</div>
+                          <div className="text-xl font-semibold mt-1">{routines.length}</div>
+                        </div>
+                        <div className="p-3 bg-white border rounded-lg">
+                          <div className="text-xs text-gray-500">Ejercicios</div>
+                          <div className="text-xl font-semibold mt-1">{exercises.length}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <aside className="bg-white rounded-xl p-4 shadow-sm border">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-xs text-gray-500">Usuario</div>
+                        <div className="font-medium">{profile?.nombre_completo || user?.email}</div>
+                        <div className="text-xs mt-1 text-gray-400">UID: <span className="font-mono text-xs">{user?.uid}</span></div>
+                      </div>
+                      <div className="flex flex-col items-end gap-2">
+                        <button onClick={() => { logout(); }} className="px-3 py-1 bg-rose-500 text-white rounded text-sm">Cerrar sesión</button>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="text-xs text-gray-500">Progreso promedio (demo)</div>
+                      <div className="mt-2">
+                        <div className="w-full h-3 bg-gray-100 rounded-full">
+                          <div className="h-3 rounded-full bg-indigo-600" style={{ width: `${profile?.dailyProgress ?? 48}%` }} />
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">{profile?.dailyProgress ?? 48}%</div>
+                      </div>
+                    </div>
+                  </aside>
+                </div>
+              </div>
+            )}
+
+            {/* Patients views */}
+            {view === "patients" && (
+              <PatientsPanel
+                patients={patients}
+                patientsLoading={patientsLoading}
+                onViewPatient={openPatientDetail}
+                // onAssignRoutine puede ser llamado desde el panel como:
+                // - onAssignRoutine(pacienteId)  -> asumirá primera rutina
+                // - onAssignRoutine({ pacienteId, rutinaId, sesiones, fecha_inicio, exerciseTargets })
+                onAssignRoutine={(payload) => {
+                  // si payload es string tratamos como pacienteId
+                  if (typeof payload === "string") return assignRoutineToPatient({ pacienteId: payload });
+                  return assignRoutineToPatient(payload);
+                }}
+                // pasar ambas versiones para compatibilidad con tus componentes
+                onUnlinkPatient={handleUnlinkPatient}
+                onUnlink={handleUnlinkPatient}
+                routines={routines}
+                busy={busy}
+                onShowAdd={() => { setShowAddForm(true); setView("addPatient"); }}
+              />
+            )}
+
+            {view === "addPatient" && (
+              <div>
+                {/* si activaste showLinkByCode lo mostramos */}
+                {showLinkByCode && (
+                  <div className="mb-4">
+                    <LinkPatientByCode therapistId={user?.uid} onLinked={handleOnLinked} />
+                  </div>
+                )}
+
+                <AddPatientForm
+                  onSubmit={handleAddPatient}
+                  onCancel={() => { setView("patients"); setShowAddForm(false); }}
+                  busy={busy}
+                  error={error}
+                />
+              </div>
+            )}
+
+            {view === "patientDetail" && selectedPatient && (
+              <PatientDetail
+                patient={selectedPatient}
+                onBack={() => setView("patients")}
+                onAssignRoutine={(rutinaId) => assignRoutineToPatient({ pacienteId: selectedPatient.id, rutinaId })}
+                routines={routines}
+              />
+            )}
+
+            {view === "profile" && (
+  <TherapistProfile
+    onBack={() => setView("home")}
+    onEdit={() => {
+      // si quieres una vista de edición, maneja aquí: por ejemplo setView("editProfile")
+      // ahora solo abrimos la vista de editar si la implementas
+      setView("home");
     }}
-    onCancel={() => setView("exercises")}
-    busy={busy}
-    error={error}
   />
 )}
+
+            {/* Routines */}
+{view === "routines" && (
+<RoutinesPanel
+  routines={routines}
+  itemsLoading={itemsLoading}
+  onCreate={() => setView("createRoutine")}
+  onView={openRoutineDetail}
+  onEdit={(r) => { setSelectedRoutine(r); setView("createRoutine"); }} // o abrir editor dedicado
+  onDelete={handleDeleteRoutine}
+/>
+
+)}
+
+            {view === "createRoutine" && (
+              <CreateRoutineForm
+                onSubmit={async (form) => { await handleCreateRoutine(form); }}
+                onCancel={() => setView("routines")}
+                exercises={exercises}
+                busy={busy}
+                error={error}
+              />
+            )}
+
+            {/* Exercises */}
+            {view === "exercises" && (
+<ExercisesPanel
+  exercises={exercises}
+  onCreate={() => setView("createExercise")}
+  onViewDetail={openExerciseDetail}
+  onEdit={handleEditExercise}
+  onDelete={handleDeleteExercise}
+/>
+            )}
+
+            {view === "createExercise" && (
+              <CreateExercise
+                onSubmit={async (form) => { await handleCreateExercise(form); }}
+                onCancel={() => setView("exercises")}
+                busy={busy}
+                error={error}
+              />
+            )}
+
+{view === "exerciseDetail" && selectedExercise && (
+  <ExerciseDetail
+    exercise={selectedExercise}
+    onBack={() => setView("exercises")}
+    onEdit={handleEditExercise}
+    onDelete={handleDeleteExercise}
+    onCreate={() => setView("createExercise")}
+  />
+)}
+
+{view === "routineDetail" && selectedRoutine && (
+  <RoutineDetail
+    routine={selectedRoutine}
+    exercises={exercises}                // <-- pasar ejercicios disponibles
+    onBack={() => setView("routines")}
+    onAssign={(rid) => assignRoutineToPatient({ pacienteId: selectedPatient?.id, rutinaId: rid })}
+    onViewExercise={openExerciseDetail}
+    onSave={handleSaveRoutine}
+    onDelete={handleDeleteRoutine}
+    busy={busy}
+  />
+)}
+
+
+
+            {/* show link panel toggle in patients area */}
+            {view === "patients" && (
+              <div className="mt-4">
+                <div className="flex gap-2">
+                  <button onClick={() => { setShowLinkByCode((s) => !s); setShowAddForm(false); }} className={`px-4 py-2 rounded ${showLinkByCode ? "bg-emerald-600 text-white" : "border"}`}>
+                    Vincular paciente (por código)
+                  </button>
+                </div>
+                {showLinkByCode && (
+                  <div className="mt-3">
+                   <LinkPatientByCode therapistId={user?.uid} onLinked={handleOnLinked} />
+
+                  </div>
+                )}
+              </div>
+            )}
 
             {error && <div className="mt-6 text-sm text-rose-600">{error}</div>}
           </div>

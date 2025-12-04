@@ -4,7 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-route
 import Login from "./pages/Login";
 import { useAuth } from "./contexts/AuthContext";
 import TherapistDashboard from "./pages/Dashboard";
-import ExercisesPage from "./pages/ExercisesPage";
+
 
 // Protected route que exige rol Terapeuta (usa useEffect para redirigir una sola vez)
 function ProtectedTherapist({ children }) {
@@ -35,7 +35,6 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/exercises" element={<ExercisesPage />} />
         <Route
           path="/dashboard"
           element={

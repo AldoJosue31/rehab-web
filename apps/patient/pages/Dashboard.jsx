@@ -32,7 +32,7 @@ export default function Dashboard() {
   const [assignedWithRoutine, setAssignedWithRoutine] = useState([]);
   const [therapists, setTherapists] = useState({});
 
-  // Cargar rutinas propias (mobile-first / fallback demo)
+  // Cargar rutinas propias (sin fallback demo)
   useEffect(() => {
     let mounted = true;
     async function loadRoutines() {
@@ -43,14 +43,13 @@ export default function Dashboard() {
           const snap = await getDocs(q);
           const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
           if (!mounted) return;
-          if (items.length) setRoutines(items);
-          else setRoutines(getDemoRoutines());
+          setRoutines(items || []); // si no hay items, queda []
         } else {
-          if (mounted) setRoutines(getDemoRoutines());
+          if (mounted) setRoutines([]); // usuario no autenticado -> vacío
         }
       } catch (err) {
         console.warn("Error cargando rutinas:", err?.message || err);
-        if (mounted) setRoutines(getDemoRoutines());
+        if (mounted) setRoutines([]); // en error, dejar vacío
       } finally {
         if (mounted) setRoutinesLoading(false);
       }
@@ -59,71 +58,114 @@ export default function Dashboard() {
     return () => { mounted = false; };
   }, [user]);
 
-  // Escuchar asignaciones
-  useEffect(() => {
-    setAsignLoading(true);
-    if (!user?.uid) {
-      setAsignaciones([]); setAsignLoading(false); setAssignmentsMap({}); setAssignedWithRoutine([]);
-      return;
-    }
-    const q = query(collection(db, "asignaciones"), where("paciente_id", "==", user.uid));
-    const unsub = onSnapshot(q, (snap) => {
-      const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setAsignaciones(items); setAsignLoading(false);
-      const map = {}; items.forEach((it) => { if (it.rutina_id && !map[it.rutina_id]) map[it.rutina_id] = it; });
-      setAssignmentsMap(map);
-      fetchRoutinesForAssignments(items);
-      fetchTherapistsForAssignments(items);
-    }, (err) => {
-      console.warn("Error escuchando asignaciones:", err?.message || err);
-      setAsignaciones([]); setAsignLoading(false); setAssignmentsMap({}); setAssignedWithRoutine([]);
-    });
-    return () => unsub();
-  }, [user]);
-
+  // Fetch routines for assignment list (returns rutMap)
   const fetchRoutinesForAssignments = useCallback(async (asigs) => {
     const rutinaIds = Array.from(new Set(asigs.map(a => a.rutina_id).filter(Boolean)));
     if (rutinaIds.length === 0) {
-      setAssignedWithRoutine(asigs.map(a => ({ assignment: a, rutina: null })));
-      return;
+      // No hay rutinas referenciadas
+      return {};
     }
-    const promises = rutinaIds.map(async (rid) => {
-      try {
-        const d = await getDoc(doc(db, "routines", rid));
-        return d.exists() ? { id: d.id, ...d.data() } : null;
-      } catch (err) { console.warn("Error getDoc routine", rid, err); return null; }
-    });
-    const rutinas = await Promise.all(promises);
-    const rutMap = {}; rutinas.forEach(r => { if (r && r.id) rutMap[r.id] = r; });
-    const combined = asigs.map(a => ({ assignment: a, rutina: a.rutina_id ? rutMap[a.rutina_id] || null : null }));
-    setAssignedWithRoutine(combined);
+
+    const rutMap = {};
+    await Promise.all(
+      rutinaIds.map(async (rid) => {
+        try {
+          const d = await getDoc(doc(db, "routines", rid));
+          if (d.exists()) rutMap[rid] = { id: d.id, ...d.data() };
+          else rutMap[rid] = null; // marcado explícito como no encontrado
+        } catch (err) {
+          console.warn("Error obteniendo rutina", rid, err?.message || err);
+          rutMap[rid] = null;
+        }
+      })
+    );
+    return rutMap;
   }, []);
 
-  const fetchTherapistsForAssignments = useCallback(async (asigs) => {
+  // Fetch therapist display names for assignments (merges into existing map)
+  const fetchTherapistsForAssignments = useCallback(async (asigs, currentTherapists = {}) => {
     const ids = Array.from(new Set(asigs.map(a => a.terapeuta_asignador_id).filter(Boolean)));
-    const missingIds = ids.filter(id => !therapists[id]);
-    if (missingIds.length === 0) return;
-    const newTherapists = {};
-    for (const id of missingIds) {
+    const missingIds = ids.filter(id => !currentTherapists[id]);
+    if (missingIds.length === 0) return {};
+
+    const found = {};
+    await Promise.all(missingIds.map(async (id) => {
       try {
         const snap = await getDoc(doc(db, "users", id));
         if (snap.exists()) {
-          const data = snap.data();
-          newTherapists[id] = data.nombre || data.nombre_completo || "Terapeuta";
-        } else newTherapists[id] = "Terapeuta desconocido";
-      } catch (err) { console.warn("Error obteniendo terapeuta:", id, err); newTherapists[id] = "Terapeuta desconocido"; }
+          const d = snap.data() || {};
+          found[id] = d.nombre || d.nombre_completo || d.displayName || "Terapeuta";
+        } else {
+          found[id] = "Terapeuta desconocido";
+        }
+      } catch (err) {
+        console.warn("Error obteniendo terapeuta:", id, err?.message || err);
+        found[id] = "Terapeuta desconocido";
+      }
+    }));
+    return found;
+  }, []);
+
+  // Escuchar asignaciones del paciente (en tiempo real)
+  useEffect(() => {
+    setAsignLoading(true);
+
+    if (!user?.uid) {
+      setAsignaciones([]);
+      setAsignLoading(false);
+      setAssignmentsMap({});
+      setAssignedWithRoutine([]);
+      return;
     }
-    setTherapists(prev => ({ ...prev, ...newTherapists }));
-  }, [therapists]);
 
-  function getDemoRoutines() {
-    return [
-      { id: "demo-r1", title: "Hombro movilidad", time: "07:00 am", durationMin: 20, progressPercent: 50 },
-      { id: "demo-r2", title: "Flexo-Extensión", time: "11:00 am", durationMin: 45, progressPercent: 20 },
-    ];
-  }
+    const q = query(collection(db, "asignaciones"), where("paciente_id", "==", user.uid));
+    const unsub = onSnapshot(q, async (snap) => {
+      try {
+        const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        setAsignaciones(items);
+        setAsignLoading(false);
 
- return (
+        // construir assignmentsMap (para RoutineList quick lookup)
+        const map = {};
+        items.forEach(it => { if (it.rutina_id) map[it.rutina_id] = it; });
+        setAssignmentsMap(map);
+
+        // Fetch routines and therapists in parallel, then combine
+        const [rutMap, newTherapists] = await Promise.all([
+          fetchRoutinesForAssignments(items),
+          fetchTherapistsForAssignments(items, therapists)
+        ]);
+
+        // merge therapist names into state
+        if (Object.keys(newTherapists).length > 0) {
+          setTherapists(prev => ({ ...prev, ...newTherapists }));
+        }
+
+        // combine assignments with the rutinas resolved (may be null if not found)
+        const combined = items.map(a => ({
+          assignment: a,
+          rutina: a.rutina_id ? (rutMap[a.rutina_id] ?? null) : null
+        }));
+
+        setAssignedWithRoutine(combined);
+      } catch (err) {
+        console.warn("Error procesando snapshot de asignaciones:", err?.message || err);
+        // Keep UI responsive: don't clear existing assignedWithRoutine, but reflect loading false
+        setAsignLoading(false);
+      }
+    }, (err) => {
+      console.warn("Error escuchando asignaciones:", err?.message || err);
+      setAsignaciones([]);
+      setAsignLoading(false);
+      setAssignmentsMap({});
+      setAssignedWithRoutine([]);
+    });
+
+    return () => unsub();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, fetchRoutinesForAssignments, fetchTherapistsForAssignments, therapists]);
+
+  return (
     <div className="min-h-screen bg-[#FFF8F3] overscroll-none overflow-x-hidden">
       {/* TopBar fijo */}
       <TopBar
@@ -131,17 +173,11 @@ export default function Dashboard() {
         onToggleSidebar={() => setSidebarOpen(s => !s)}
       />
 
-      {/* WRAPPER: dejamos espacio para el TopBar con pt-24 y en md usamos grid de 2 columnas:
-          columna 1 = 16rem (sidebar), columna 2 = contenido */}
       <div className="md:grid md:grid-cols-[16rem_1fr]">
-        {/* Sidebar: contiene BOTH: drawer (mobile) y aside (desktop in-flow) */}
         <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
-        {/* main ya NO necesita ml/pl para el sidebar; el grid se encarga */}
         <main className="flex">
           <div className="flex-1 p-4 md:p-8 max-w-7xl mx-auto w-full space-y-6">
-            {/* === aquí va todo tu contenido tal cual lo tenías === */}
-            {/* Encabezado (greeting + UID) */}
             <div className="rounded-xl overflow-hidden">
               <div className="bg-[#0a0a0a] text-white py-4 px-4 md:py-6 md:px-8 rounded-t-xl flex items-center justify-between">
                 <div>
@@ -164,7 +200,6 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Grid principal */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
               <div className="lg:col-span-2 space-y-4">
                 <ProgressWidget percent={profile?.dailyProgress ?? 50} />
@@ -209,7 +244,7 @@ export default function Dashboard() {
 
               <aside className="hidden lg:block">
                 <div className="h-full bg-white rounded-xl p-6 shadow-sm border border-gray-200 flex flex-col items-center justify-center">
-                  <img src="/assets/illustration-exercise.png" alt="Ilustración ejercicio" className="w-56 mb-4" />
+                  <img src="https://img.freepik.com/vector-premium/ilustracion-vectorial-plana-isometrica-3d-fisioterapeutas-masajistas-trabajo-articulo-1_109064-1630.jpg" alt="Ilustración ejercicio" className="w-56 mb-4" />
                   <div className="text-center">
                     <div className="text-sm text-gray-500">Sigue tu plan</div>
                     <div className="font-semibold mt-1">Completa las rutinas diarias</div>
@@ -218,7 +253,6 @@ export default function Dashboard() {
               </aside>
             </div>
 
-            {/* footer mobile: logout */}
             <div className="md:hidden flex justify-center mt-4">
               <button onClick={logout} className="w-full max-w-sm px-4 py-2 bg-red-500 text-white rounded shadow-sm text-sm">Cerrar sesión</button>
             </div>
