@@ -32,6 +32,9 @@ export default function Dashboard() {
   const [assignedWithRoutine, setAssignedWithRoutine] = useState([]);
   const [therapists, setTherapists] = useState({});
 
+  // map exerciseId -> exerciseDoc (fetched from /ejercicios)
+  const [exercisesById, setExercisesById] = useState({});
+
   // Cargar rutinas propias (sin fallback demo)
   useEffect(() => {
     let mounted = true;
@@ -62,7 +65,6 @@ export default function Dashboard() {
   const fetchRoutinesForAssignments = useCallback(async (asigs) => {
     const rutinaIds = Array.from(new Set(asigs.map(a => a.rutina_id).filter(Boolean)));
     if (rutinaIds.length === 0) {
-      // No hay rutinas referenciadas
       return {};
     }
 
@@ -72,7 +74,7 @@ export default function Dashboard() {
         try {
           const d = await getDoc(doc(db, "routines", rid));
           if (d.exists()) rutMap[rid] = { id: d.id, ...d.data() };
-          else rutMap[rid] = null; // marcado explícito como no encontrado
+          else rutMap[rid] = null;
         } catch (err) {
           console.warn("Error obteniendo rutina", rid, err?.message || err);
           rutMap[rid] = null;
@@ -82,7 +84,7 @@ export default function Dashboard() {
     return rutMap;
   }, []);
 
-  // Fetch therapist display names for assignments (merges into existing map)
+  // Fetch therapist display names for assignments
   const fetchTherapistsForAssignments = useCallback(async (asigs, currentTherapists = {}) => {
     const ids = Array.from(new Set(asigs.map(a => a.terapeuta_asignador_id).filter(Boolean)));
     const missingIds = ids.filter(id => !currentTherapists[id]);
@@ -130,7 +132,7 @@ export default function Dashboard() {
         items.forEach(it => { if (it.rutina_id) map[it.rutina_id] = it; });
         setAssignmentsMap(map);
 
-        // Fetch routines and therapists in parallel, then combine
+        // Fetch routines and therapists in parallel
         const [rutMap, newTherapists] = await Promise.all([
           fetchRoutinesForAssignments(items),
           fetchTherapistsForAssignments(items, therapists)
@@ -148,9 +150,34 @@ export default function Dashboard() {
         }));
 
         setAssignedWithRoutine(combined);
+
+        // trigger exercises fetch (for assigned_exercises references)
+        const exerciseIds = Array.from(
+          new Set(
+            items.flatMap(it => (it.assigned_exercises || []).map(e => e.exercise_id).filter(Boolean))
+          )
+        );
+        if (exerciseIds.length > 0) {
+          // fetch only missing ones
+          const missing = exerciseIds.filter(id => !exercisesById[id]);
+          if (missing.length > 0) {
+            const fetched = {};
+            await Promise.all(missing.map(async (eid) => {
+              try {
+                const s = await getDoc(doc(db, "ejercicios", eid));
+                if (s.exists()) fetched[eid] = { id: s.id, ...s.data() };
+                else fetched[eid] = null;
+              } catch (err) {
+                console.warn("Error fetching ejercicio", eid, err);
+                fetched[eid] = null;
+              }
+            }));
+            setExercisesById(prev => ({ ...prev, ...fetched }));
+          }
+        }
+
       } catch (err) {
         console.warn("Error procesando snapshot de asignaciones:", err?.message || err);
-        // Keep UI responsive: don't clear existing assignedWithRoutine, but reflect loading false
         setAsignLoading(false);
       }
     }, (err) => {
@@ -162,8 +189,27 @@ export default function Dashboard() {
     });
 
     return () => unsub();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, fetchRoutinesForAssignments, fetchTherapistsForAssignments, therapists]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, fetchRoutinesForAssignments, fetchTherapistsForAssignments, therapists, exercisesById]);
+
+  // helper to detect youtube url and extract embed source
+  const getYouTubeEmbedSrc = (url) => {
+    if (!url) return null;
+    try {
+      const u = new URL(url);
+      if (u.hostname.includes("youtube.com")) {
+        const v = u.searchParams.get("v");
+        return v ? `https://www.youtube.com/embed/${v}` : null;
+      }
+      if (u.hostname.includes("youtu.be")) {
+        const v = u.pathname.replace("/", "");
+        return v ? `https://www.youtube.com/embed/${v}` : null;
+      }
+      return null;
+    } catch (err) {
+      return null;
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#FFF8F3] overscroll-none overflow-x-hidden">
@@ -223,6 +269,67 @@ export default function Dashboard() {
                                 Estado: <span className="font-medium text-gray-700">{assignment.estado}</span> • Progreso: <span className="font-mono">{assignment.progreso ?? 0}%</span>
                               </div>
                               {assignment.notas && <div className="text-sm text-gray-600 mt-2">{assignment.notas}</div>}
+
+                              {/* --- EJERCICIOS DE LA ASIGNACIÓN --- */}
+                              {assignment.assigned_exercises && assignment.assigned_exercises.length > 0 && (
+                                <div className="mt-4">
+                                  <h5 className="font-medium mb-2">Ejercicios</h5>
+                                  <div className="space-y-3">
+                                    {assignment.assigned_exercises.map((exItem, i) => {
+                                      const exId = exItem.exercise_id;
+                                      const fetched = exId ? exercisesById[exId] : null;
+                                      const name = exItem.nombre || fetched?.nombre || `Ejercicio ${i + 1}`;
+                                      const desc = exItem.description || exItem.descripcion || fetched?.description || fetched?.descripcion || "";
+                                      const reps = exItem.target_repeticiones ?? exItem.default_repeticiones ?? exItem.repeticiones ?? fetched?.default_repeticiones ?? fetched?.repeticiones ?? null;
+                                      const series = exItem.target_series ?? exItem.default_series ?? exItem.series ?? fetched?.default_series ?? fetched?.series ?? null;
+                                      const timeSec = exItem.target_tiempo_segundos ?? exItem.default_tiempo_segundos ?? exItem.tiempo_segundos ?? fetched?.default_tiempo_segundos ?? fetched?.tiempo_segundos ?? null;
+                                      const urlVideo = fetched?.url_video || exItem.url_video || exItem.video_url || null;
+                                      const embed = getYouTubeEmbedSrc(urlVideo);
+
+                                      return (
+                                        <div key={exId ?? i} className="p-3 border rounded">
+                                          <div className="flex items-start justify-between gap-4">
+                                            <div className="flex-1">
+                                              <div className="font-medium">{name}</div>
+                                              {desc && <div className="text-sm text-gray-600 mt-1">{desc}</div>}
+                                              <div className="text-xs text-gray-500 mt-2">
+                                                {reps ? `Reps: ${reps}` : ""}
+                                                {series ? ` • Series: ${series}` : ""}
+                                                {timeSec ? ` • Tiempo: ${timeSec}s` : ""}
+                                              </div>
+                                              {urlVideo && (
+                                                <div className="mt-2">
+                                                  {embed ? (
+                                                    <div className="w-full aspect-[16/9] rounded overflow-hidden">
+                                                      <iframe
+                                                        src={embed}
+                                                        title={`video-${exId || i}`}
+                                                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                                        allowFullScreen
+                                                        className="w-full h-full"
+                                                      />
+                                                    </div>
+                                                  ) : (
+                                                    <a href={urlVideo} target="_blank" rel="noreferrer" className="text-sm text-indigo-600 underline">
+                                                      Ver video
+                                                    </a>
+                                                  )}
+                                                </div>
+                                              )}
+                                            </div>
+
+                                            <div className="flex-shrink-0 text-right">
+                                              <div className="text-xs text-gray-500">Fuente</div>
+                                              <div className="text-sm text-gray-700">{fetched ? "Ficha oficial" : "Plantilla / copia"}</div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+                              {/* end ejercicios */}
                             </div>
 
                             <div className="flex-shrink-0 text-right">
